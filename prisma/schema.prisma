@@ -1,0 +1,77 @@
+// AIVA Studio - Prisma schema (TASK-001 foundation)
+//
+// Status/type fields are modeled as String rather than native Prisma enums
+// because the SQLite connector does not support enum columns. The
+// authoritative set of allowed values lives in TypeScript/Zod under
+// src/domain, and Prisma stores whatever those layers validate.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  script      String   @default("")
+  status      String   @default("DRAFT")
+  aspectRatio String   @default("9:16")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  scenes Scene[]
+  assets Asset[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("projects")
+}
+
+model Brand {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([name])
+  @@map("brands")
+}
+
+model Scene {
+  id        String   @id @default(cuid())
+  projectId String
+  sequence  Int
+  text      String
+  status    String   @default("PENDING")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, sequence])
+  @@index([projectId])
+  @@index([status])
+  @@map("scenes")
+}
+
+model Asset {
+  id        String   @id @default(cuid())
+  type      String
+  source    String
+  localPath String?
+  metadata  String?
+  createdAt DateTime @default(now())
+
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([projectId])
+  @@index([type])
+  @@index([source])
+  @@map("assets")
+}
