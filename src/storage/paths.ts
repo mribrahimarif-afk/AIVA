@@ -111,14 +111,18 @@ export function toStorageRelativePath(absolutePath: string): string {
 
 /**
  * Safely resolves a storage-relative path to an absolute path inside AIVA_STORAGE_ROOT.
- * Rejects ALL absolute path inputs, path traversal (`../`), and outside-root escapes.
+ * Rejects ALL absolute path inputs (Windows or POSIX), path traversal (`../`), and outside-root escapes.
  */
 export function resolveStoragePath(relativePath: string): string {
   if (!relativePath || typeof relativePath !== "string") {
     throw new StorageError("Relative storage path must be a non-empty string");
   }
 
-  if (path.isAbsolute(relativePath)) {
+  if (
+    path.isAbsolute(relativePath) ||
+    path.win32.isAbsolute(relativePath) ||
+    path.posix.isAbsolute(relativePath)
+  ) {
     throw new StorageError(
       `Invalid storage relative path: absolute paths are not permitted in Vault storage resolution ('${relativePath}')`,
       { relativePath }

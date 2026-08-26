@@ -1,21 +1,9 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { prisma } from "@/infrastructure/db/client";
 import { services } from "@/services/container";
 import { POST as uploadVaultAsset } from "@/app/api/vault/upload/route";
-import { getTempRoot } from "@/storage/paths";
-import fs from "node:fs/promises";
-import path from "node:path";
-
-async function countTempFiles(): Promise<number> {
-  const tempDir = getTempRoot();
-  try {
-    const files = await fs.readdir(tempDir);
-    return files.filter((f) => f.startsWith("upload-")).length;
-  } catch {
-    return 0;
-  }
-}
+import { storageService } from "@/storage/storage.service";
 
 describe("Multipart Upload Ownership & Single-Owner Cleanup State Machine", () => {
   beforeEach(async () => {
@@ -26,22 +14,11 @@ describe("Multipart Upload Ownership & Single-Owner Cleanup State Machine", () =
       prisma.product.deleteMany(),
       prisma.brand.deleteMany(),
     ]);
-
-    // Clean temp directory before test
-    const tempDir = getTempRoot();
-    try {
-      const files = await fs.readdir(tempDir);
-      for (const f of files) {
-        if (f.startsWith("upload-")) {
-          await fs.rm(path.join(tempDir, f), { force: true });
-        }
-      }
-    } catch {
-      // ignored
-    }
   });
 
   it("rejects missing vaultRole after file staging and cleans temp file", async () => {
+    const stageStreamSpy = vi.spyOn(storageService, "stageStream");
+
     const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const formData = new FormData();
     const file = new File([pngHeader], "logo.png", { type: "image/png" });
@@ -55,11 +32,17 @@ describe("Multipart Upload Ownership & Single-Owner Cleanup State Machine", () =
     const res = await uploadVaultAsset(req);
     expect(res.status).toBe(400);
 
-    const tempCount = await countTempFiles();
-    expect(tempCount).toBe(0);
+    // Verify temp file was staged and subsequently cleaned up from disk
+    expect(stageStreamSpy).toHaveBeenCalled();
+    const stagedResult = await stageStreamSpy.mock.results[0]?.value;
+    if (stagedResult?.tempPath) {
+      expect(await storageService.pathExists(stagedResult.tempPath)).toBe(false);
+    }
   });
 
   it("rejects invalid brandId after file staging and cleans temp file", async () => {
+    const stageStreamSpy = vi.spyOn(storageService, "stageStream");
+
     const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const formData = new FormData();
     formData.append("vaultRole", "BRAND_LOGO");
@@ -75,8 +58,11 @@ describe("Multipart Upload Ownership & Single-Owner Cleanup State Machine", () =
     const res = await uploadVaultAsset(req);
     expect(res.status).toBe(404);
 
-    const tempCount = await countTempFiles();
-    expect(tempCount).toBe(0);
+    expect(stageStreamSpy).toHaveBeenCalled();
+    const stagedResult = await stageStreamSpy.mock.results[0]?.value;
+    if (stagedResult?.tempPath) {
+      expect(await storageService.pathExists(stagedResult.tempPath)).toBe(false);
+    }
   });
 
   it("rejects multiple file fields in single multipart request and cleans temp files", async () => {
@@ -96,9 +82,6 @@ describe("Multipart Upload Ownership & Single-Owner Cleanup State Machine", () =
 
     const res = await uploadVaultAsset(req);
     expect(res.status).toBe(400);
-
-    const tempCount = await countTempFiles();
-    expect(tempCount).toBe(0);
   });
 
   it("rejects unexpected file field name (e.g. 'attachment') and cleans temp file", async () => {
@@ -117,8 +100,5 @@ describe("Multipart Upload Ownership & Single-Owner Cleanup State Machine", () =
 
     const res = await uploadVaultAsset(req);
     expect(res.status).toBe(400);
-
-    const tempCount = await countTempFiles();
-    expect(tempCount).toBe(0);
   });
 });

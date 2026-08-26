@@ -19,7 +19,8 @@ describe("Streaming Upload API Integration — POST /api/vault/upload", () => {
     const brand = await services.brand.createBrand({ name: "Stream Brand", slug: "stream-brand" });
 
     const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const payload = Buffer.concat([pngHeader, Buffer.from("STREAMING_BINARY_DATA_CHUNK_999")]);
+    const uniquePayload = Buffer.from(`STREAMING_BINARY_DATA_${Date.now()}_${Math.random()}`);
+    const payload = Buffer.concat([pngHeader, uniquePayload]);
 
     const formData = new FormData();
     formData.append("vaultRole", "BRAND_LOGO");

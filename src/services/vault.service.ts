@@ -158,17 +158,163 @@ export function createVaultService(
     stagedInfo: StagedUploadResult,
     originalFilename: string,
     mimeType: string,
-    role: VaultRole,
-    resolvedBrandId: string | null,
-    resolvedProductId: string | null,
+    vaultRoleInput: VaultRole,
+    brandIdInput?: string | null,
+    productIdInput?: string | null,
     title?: string | null
   ): Promise<UploadVaultAssetResult> {
     const { tempPath, sizeBytes, checksum, leadingBuffer } = stagedInfo;
 
-    let validationResult: { detectedExt: string; detectedMime: string };
     try {
-      validationResult = validateRoleFile(originalFilename, mimeType, role, leadingBuffer);
-    } catch (validationErr) {
+      // Critical Lifecycle under Per-Checksum Process-Local Mutex
+      return await checksumMutex.runExclusive(checksum, async () => {
+        const { role, resolvedBrandId, resolvedProductId } = await resolveAndValidateOwnership(
+          vaultRoleInput,
+          brandIdInput,
+          productIdInput
+        );
+
+        let validationResult: { detectedExt: string; detectedMime: string };
+        try {
+          validationResult = validateRoleFile(originalFilename, mimeType, role, leadingBuffer);
+        } catch (validationErr) {
+          throw new ValidationError(
+            validationErr instanceof Error ? validationErr.message : String(validationErr),
+            { originalFilename, mimeType, role }
+          );
+        }
+
+        const rules = ROLE_FILE_RULES[role];
+        const defaultAssetType = rules.defaultAssetType;
+        const canonicalExtension = `.${validationResult.detectedExt}`;
+
+        // 1. Check if ContentBlob already exists in DB
+        const preExistingBlob = await blobRepo.findByChecksum(checksum);
+        if (preExistingBlob) {
+          await storageService.removeTempFile(tempPath);
+
+          const asset = await assetRepo.create({
+            title: title || originalFilename,
+            originalFilename,
+            type: defaultAssetType,
+            vaultRole: role,
+            source: "LOCAL_UPLOAD",
+            localPath: preExistingBlob.storagePath,
+            mimeType: validationResult.detectedMime || mimeType || preExistingBlob.mimeType,
+            sizeBytes,
+            checksum,
+            metadata: {
+              reused: true,
+              deduplicated: true,
+            },
+            brandId: resolvedBrandId,
+            productId: resolvedProductId,
+            blobId: preExistingBlob.id,
+          });
+
+          logger.info({
+            event: "vault.duplicate_reused",
+            assetId: asset.id,
+            blobId: preExistingBlob.id,
+            checksum,
+            sizeBytes,
+            role,
+            message: `Reused existing content blob for '${originalFilename}'`,
+          });
+
+          return { asset, isDuplicate: true };
+        }
+
+        let createdByThisUpload = false;
+        let createdCanonicalAbsPath: string | null = null;
+
+        try {
+          const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
+          createdByThisUpload = finalized.createdByThisUpload;
+          createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
+
+          let blob = await blobRepo.findByChecksum(checksum);
+          if (!blob) {
+            blob = await blobRepo.create({
+              checksum,
+              storagePath: finalized.storageRelativePath,
+              sizeBytes,
+              mimeType: validationResult.detectedMime || mimeType || "application/octet-stream",
+            });
+          }
+
+          const isDuplicate = !createdByThisUpload;
+
+          const asset = await assetRepo.create({
+            title: title || originalFilename,
+            originalFilename,
+            type: defaultAssetType,
+            vaultRole: role,
+            source: "LOCAL_UPLOAD",
+            localPath: blob.storagePath,
+            mimeType: validationResult.detectedMime || mimeType || blob.mimeType,
+            sizeBytes,
+            checksum,
+            metadata: {
+              reused: isDuplicate,
+              deduplicated: isDuplicate,
+            },
+            brandId: resolvedBrandId,
+            productId: resolvedProductId,
+            blobId: blob.id,
+          });
+
+          logger.info({
+            event: createdByThisUpload ? "vault.asset_stored" : "vault.duplicate_reused",
+            assetId: asset.id,
+            blobId: blob.id,
+            checksum,
+            sizeBytes,
+            role,
+            message: createdByThisUpload
+              ? `Stored new canonical asset '${originalFilename}'`
+              : `Reused existing content blob for '${originalFilename}'`,
+          });
+
+          return { asset, isDuplicate };
+        } catch (err) {
+          // Safe Reference-Safe Compensation under Mutex
+          if (createdByThisUpload && createdCanonicalAbsPath) {
+            const existingBlob = await blobRepo.findByChecksum(checksum);
+            if (!existingBlob) {
+              try {
+                await storageService.compensateCanonicalBlob(createdCanonicalAbsPath);
+              } catch (compErr) {
+                logger.error({
+                  event: "vault.compensation_failed",
+                  canonicalAbsolutePath: createdCanonicalAbsPath,
+                  error: compErr,
+                  message: "Failed to compensate canonical file after asset creation failure",
+                });
+                throw new StorageError(
+                  `Asset processing failed and canonical file compensation also failed; file is orphaned at '${createdCanonicalAbsPath}'`,
+                  {
+                    canonicalAbsolutePath: createdCanonicalAbsPath,
+                    canonicalOrphaned: true,
+                    primaryCause: err instanceof Error ? err.message : String(err),
+                    compensationCause: compErr instanceof Error ? compErr.message : String(compErr),
+                  }
+                );
+              }
+            }
+          }
+
+          logger.error({
+            event: "vault.upload_failed",
+            originalFilename,
+            error: err,
+            message: "Failed during vault asset processing",
+          });
+          throw err;
+        }
+      });
+    } catch (primaryErr) {
+      // If processStagedUpload fails at any point after ownership transfer, VaultService cleans up tempPath!
       let cleanupFailed = false;
       let cleanupErrMessage = "";
       try {
@@ -180,226 +326,55 @@ export function createVaultService(
 
       if (cleanupFailed) {
         throw new StorageError(
-          `File validation failed for '${originalFilename}', and temporary file cleanup also failed; file is orphaned at '${tempPath}'`,
+          `Upload processing failed, and temporary file cleanup also failed; file is orphaned at '${tempPath}'`,
           {
             tempPath,
             partialUploadOrphaned: true,
-            validationCause: validationErr instanceof Error ? validationErr.message : String(validationErr),
+            primaryCause: primaryErr instanceof Error ? primaryErr.message : String(primaryErr),
             cleanupCause: cleanupErrMessage,
           }
         );
       }
 
-      throw new ValidationError(
-        validationErr instanceof Error ? validationErr.message : String(validationErr),
-        { originalFilename, mimeType, role }
-      );
+      throw primaryErr;
     }
-
-    const rules = ROLE_FILE_RULES[role];
-    const defaultAssetType = rules.defaultAssetType;
-    const canonicalExtension = `.${validationResult.detectedExt}`;
-
-    // Critical Lifecycle under Per-Checksum Process-Local Mutex
-    return checksumMutex.runExclusive(checksum, async () => {
-      // 1. Check if ContentBlob already exists in DB
-      const preExistingBlob = await blobRepo.findByChecksum(checksum);
-      if (preExistingBlob) {
-        await storageService.removeTempFile(tempPath);
-
-        const asset = await assetRepo.create({
-          title: title || originalFilename,
-          originalFilename,
-          type: defaultAssetType,
-          vaultRole: role,
-          source: "LOCAL_UPLOAD",
-          localPath: preExistingBlob.storagePath,
-          mimeType: validationResult.detectedMime || mimeType || preExistingBlob.mimeType,
-          sizeBytes,
-          checksum,
-          metadata: {
-            reused: true,
-            deduplicated: true,
-          },
-          brandId: resolvedBrandId,
-          productId: resolvedProductId,
-          blobId: preExistingBlob.id,
-        });
-
-        logger.info({
-          event: "vault.duplicate_reused",
-          assetId: asset.id,
-          blobId: preExistingBlob.id,
-          checksum,
-          sizeBytes,
-          role,
-          message: `Reused existing content blob for '${originalFilename}'`,
-        });
-
-        return { asset, isDuplicate: true };
-      }
-
-      let createdByThisUpload = false;
-      let createdCanonicalAbsPath: string | null = null;
-
-      try {
-        const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
-        createdByThisUpload = finalized.createdByThisUpload;
-        createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
-
-        let blob = await blobRepo.findByChecksum(checksum);
-        if (!blob) {
-          blob = await blobRepo.create({
-            checksum,
-            storagePath: finalized.storageRelativePath,
-            sizeBytes,
-            mimeType: validationResult.detectedMime || mimeType || "application/octet-stream",
-          });
-        }
-
-        const isDuplicate = !createdByThisUpload;
-
-        const asset = await assetRepo.create({
-          title: title || originalFilename,
-          originalFilename,
-          type: defaultAssetType,
-          vaultRole: role,
-          source: "LOCAL_UPLOAD",
-          localPath: blob.storagePath,
-          mimeType: validationResult.detectedMime || mimeType || blob.mimeType,
-          sizeBytes,
-          checksum,
-          metadata: {
-            reused: isDuplicate,
-            deduplicated: isDuplicate,
-          },
-          brandId: resolvedBrandId,
-          productId: resolvedProductId,
-          blobId: blob.id,
-        });
-
-        logger.info({
-          event: createdByThisUpload ? "vault.asset_stored" : "vault.duplicate_reused",
-          assetId: asset.id,
-          blobId: blob.id,
-          checksum,
-          sizeBytes,
-          role,
-          message: createdByThisUpload
-            ? `Stored new canonical asset '${originalFilename}'`
-            : `Reused existing content blob for '${originalFilename}'`,
-        });
-
-        return { asset, isDuplicate };
-      } catch (err) {
-        // Safe Reference-Safe Compensation under Mutex
-        if (createdByThisUpload && createdCanonicalAbsPath) {
-          const existingBlob = await blobRepo.findByChecksum(checksum);
-          if (!existingBlob) {
-            try {
-              await storageService.compensateCanonicalBlob(createdCanonicalAbsPath);
-            } catch (compErr) {
-              logger.error({
-                event: "vault.compensation_failed",
-                canonicalAbsolutePath: createdCanonicalAbsPath,
-                error: compErr,
-                message: "Failed to compensate canonical file after asset creation failure",
-              });
-              throw new StorageError(
-                `Asset processing failed and canonical file compensation also failed; file is orphaned at '${createdCanonicalAbsPath}'`,
-                {
-                  canonicalAbsolutePath: createdCanonicalAbsPath,
-                  canonicalOrphaned: true,
-                  primaryCause: err instanceof Error ? err.message : String(err),
-                  compensationCause: compErr instanceof Error ? compErr.message : String(compErr),
-                }
-              );
-            }
-          }
-        }
-
-        logger.error({
-          event: "vault.upload_failed",
-          originalFilename,
-          error: err,
-          message: "Failed during vault asset processing",
-        });
-        throw err;
-      }
-    });
   }
 
   return {
     async uploadAsset(input) {
-      const { role, resolvedBrandId, resolvedProductId } = await resolveAndValidateOwnership(
-        input.vaultRole,
-        input.brandId,
-        input.productId
-      );
-
-      logger.info({
-        event: "vault.upload_started",
-        originalFilename: input.originalFilename,
-        role,
-        brandId: resolvedBrandId,
-        productId: resolvedProductId,
-        message: `Starting upload for '${input.originalFilename}' as ${role}`,
-      });
-
       const stagedInfo = await storageService.stageFile(input.fileBuffer, input.originalFilename);
       return processStagedUpload(
         stagedInfo,
         input.originalFilename,
         input.mimeType,
-        role,
-        resolvedBrandId,
-        resolvedProductId,
+        input.vaultRole,
+        input.brandId,
+        input.productId,
         input.title
       );
     },
 
     async uploadStream(input) {
-      const { role, resolvedBrandId, resolvedProductId } = await resolveAndValidateOwnership(
-        input.vaultRole,
-        input.brandId,
-        input.productId
-      );
-
-      logger.info({
-        event: "vault.stream_upload_started",
-        originalFilename: input.originalFilename,
-        role,
-        brandId: resolvedBrandId,
-        productId: resolvedProductId,
-        message: `Starting stream upload for '${input.originalFilename}' as ${role}`,
-      });
-
       const stagedInfo = await storageService.stageStream(input.fileStream, input.originalFilename);
       return processStagedUpload(
         stagedInfo,
         input.originalFilename,
         input.mimeType,
-        role,
-        resolvedBrandId,
-        resolvedProductId,
+        input.vaultRole,
+        input.brandId,
+        input.productId,
         input.title
       );
     },
 
     async uploadStaged(input) {
-      const { role, resolvedBrandId, resolvedProductId } = await resolveAndValidateOwnership(
-        input.vaultRole,
-        input.brandId,
-        input.productId
-      );
-
       return processStagedUpload(
         input.stagedInfo,
         input.originalFilename,
         input.mimeType,
-        role,
-        resolvedBrandId,
-        resolvedProductId,
+        input.vaultRole,
+        input.brandId,
+        input.productId,
         input.title
       );
     },
