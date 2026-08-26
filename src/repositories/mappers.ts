@@ -2,25 +2,22 @@ import type { z } from "zod";
 import type {
   Project as PrismaProject,
   Brand as PrismaBrand,
+  Product as PrismaProduct,
+  ProductAlias as PrismaProductAlias,
+  ContentBlob as PrismaContentBlob,
   Scene as PrismaScene,
   Asset as PrismaAsset,
 } from "@prisma/client";
 import type { Project } from "@/domain/project";
 import { aspectRatioSchema, projectStatusSchema } from "@/domain/project";
 import type { Brand } from "@/domain/brand";
+import type { Product, ProductAlias } from "@/domain/product";
 import type { Scene } from "@/domain/scene";
 import { sceneStatusSchema } from "@/domain/scene";
-import type { Asset } from "@/domain/asset";
-import { assetSourceSchema, assetTypeSchema } from "@/domain/asset";
+import type { Asset, ContentBlob } from "@/domain/asset";
+import { assetSourceSchema, assetTypeSchema, vaultRoleSchema } from "@/domain/asset";
 import { DataIntegrityError } from "@/domain/errors";
 
-/**
- * Re-validates a value read back from the database against its domain
- * schema, rather than casting it. SQLite has no enum constraint on these
- * columns, so a corrupted or hand-edited row is the only way an invalid
- * value gets in — this is what turns that into a controlled application
- * error instead of a silently-wrong "valid" domain object.
- */
 function parseOrThrow<T>(schema: z.ZodType<T>, value: unknown, field: string, recordId: string): T {
   const result = schema.safeParse(value);
   if (!result.success) {
@@ -45,13 +42,58 @@ export function toProject(row: PrismaProject): Project {
   };
 }
 
-export function toBrand(row: PrismaBrand): Brand {
+export function toBrand(
+  row: PrismaBrand & {
+    products?: PrismaProduct[];
+    assets?: PrismaAsset[];
+  }
+): Brand {
   return {
     id: row.id,
     name: row.name,
     slug: row.slug,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    products: row.products ? row.products.map(toProduct) : undefined,
+    assets: row.assets ? row.assets.map(toAsset) : undefined,
+  };
+}
+
+export function toProductAlias(row: PrismaProductAlias): ProductAlias {
+  return {
+    id: row.id,
+    productId: row.productId,
+    alias: row.alias,
+    normalizedAlias: row.normalizedAlias,
+    createdAt: row.createdAt,
+  };
+}
+
+export function toProduct(
+  row: PrismaProduct & {
+    aliases?: PrismaProductAlias[];
+  }
+): Product {
+  return {
+    id: row.id,
+    brandId: row.brandId,
+    name: row.name,
+    slug: row.slug,
+    description: row.description,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    aliases: row.aliases ? row.aliases.map(toProductAlias) : undefined,
+  };
+}
+
+export function toContentBlob(row: PrismaContentBlob): ContentBlob {
+  return {
+    id: row.id,
+    checksum: row.checksum,
+    storagePath: row.storagePath,
+    sizeBytes: row.sizeBytes,
+    mimeType: row.mimeType,
+    createdAt: row.createdAt,
   };
 }
 
@@ -70,11 +112,22 @@ export function toScene(row: PrismaScene): Scene {
 export function toAsset(row: PrismaAsset): Asset {
   return {
     id: row.id,
+    title: row.title ?? null,
+    originalFilename: row.originalFilename ?? null,
     type: parseOrThrow(assetTypeSchema, row.type, "Asset.type", row.id),
+    vaultRole: row.vaultRole
+      ? parseOrThrow(vaultRoleSchema, row.vaultRole, "Asset.vaultRole", row.id)
+      : null,
     source: parseOrThrow(assetSourceSchema, row.source, "Asset.source", row.id),
-    localPath: row.localPath,
+    localPath: row.localPath ?? null,
+    mimeType: row.mimeType ?? null,
+    sizeBytes: row.sizeBytes ?? null,
+    checksum: row.checksum ?? null,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
-    projectId: row.projectId,
+    projectId: row.projectId ?? null,
+    brandId: row.brandId ?? null,
+    productId: row.productId ?? null,
+    blobId: row.blobId ?? null,
     createdAt: row.createdAt,
   };
 }

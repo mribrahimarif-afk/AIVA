@@ -23,6 +23,7 @@ export type ProjectWorkspaceSubdir = (typeof PROJECT_WORKSPACE_SUBDIRS)[number];
 export const GLOBAL_STORAGE_DIRS = ["brands", "assets", "cache", "temp"] as const;
 
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const CHECKSUM_PATTERN = /^[a-fA-F0-9]{64}$/;
 
 function assertSafeSegment(segment: string, label: string): void {
   if (!segment || !PROJECT_ID_PATTERN.test(segment)) {
@@ -64,10 +65,46 @@ export function getAssetsRoot(): string {
   return path.join(getStorageRoot(), "assets");
 }
 
+export function getBlobsRoot(): string {
+  return path.join(getAssetsRoot(), "blobs");
+}
+
 export function getCacheRoot(): string {
   return path.join(getStorageRoot(), "cache");
 }
 
 export function getTempRoot(): string {
   return path.join(getStorageRoot(), "temp");
+}
+
+export function getCanonicalBlobPath(checksum: string, extension: string): string {
+  if (!checksum || !CHECKSUM_PATTERN.test(checksum)) {
+    throw new Error(`Invalid SHA-256 checksum format: "${checksum}"`);
+  }
+  const prefix = checksum.substring(0, 2).toLowerCase();
+  const cleanExt = extension.startsWith(".") ? extension.toLowerCase() : `.${extension.toLowerCase()}`;
+  if (cleanExt.includes("/") || cleanExt.includes("\\") || cleanExt.includes("..")) {
+    throw new Error(`Invalid file extension: "${extension}"`);
+  }
+  return path.join(getBlobsRoot(), prefix, `${checksum.toLowerCase()}${cleanExt}`);
+}
+
+export function toStorageRelativePath(absolutePath: string): string {
+  const root = getStorageRoot();
+  const normalizedAbs = path.normalize(absolutePath);
+  const normalizedRoot = path.normalize(root);
+
+  if (normalizedAbs.startsWith(normalizedRoot)) {
+    const rel = path.relative(normalizedRoot, normalizedAbs);
+    return rel.replace(/\\/g, "/");
+  }
+
+  return absolutePath.replace(/\\/g, "/");
+}
+
+export function resolveStoragePath(relativePath: string): string {
+  if (path.isAbsolute(relativePath)) {
+    return path.normalize(relativePath);
+  }
+  return path.join(getStorageRoot(), relativePath);
 }

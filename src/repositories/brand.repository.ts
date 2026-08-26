@@ -10,6 +10,7 @@ export interface CreateBrandRecord {
 export interface BrandRepository {
   create(input: CreateBrandRecord): Promise<Brand>;
   findAll(): Promise<Brand[]>;
+  findById(id: string): Promise<Brand | null>;
   findBySlug(slug: string): Promise<Brand | null>;
   count(): Promise<number>;
 }
@@ -22,12 +23,26 @@ export function createBrandRepository(db: PrismaClient): BrandRepository {
     },
 
     async findAll() {
-      const rows = await db.brand.findMany({ orderBy: { createdAt: "desc" } });
+      const rows = await db.brand.findMany({
+        orderBy: { createdAt: "desc" },
+        include: { products: true },
+      });
       return rows.map(toBrand);
     },
 
+    async findById(id) {
+      const row = await db.brand.findUnique({
+        where: { id },
+        include: { products: true },
+      });
+      return row ? toBrand(row) : null;
+    },
+
     async findBySlug(slug) {
-      const row = await db.brand.findUnique({ where: { slug } });
+      const row = await db.brand.findUnique({
+        where: { slug },
+        include: { products: true },
+      });
       return row ? toBrand(row) : null;
     },
 

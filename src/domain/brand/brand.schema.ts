@@ -9,7 +9,8 @@ export const createBrandSchema = z.object({
     .trim()
     .min(1, "Slug is required")
     .max(200)
-    .regex(slugPattern, "Slug must be lowercase, alphanumeric, and hyphen-separated"),
+    .regex(slugPattern, "Slug must be lowercase, alphanumeric, and hyphen-separated")
+    .optional(),
 });
 
 export type CreateBrandInput = z.infer<typeof createBrandSchema>;

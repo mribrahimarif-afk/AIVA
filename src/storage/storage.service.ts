@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import crypto, { randomUUID } from "node:crypto";
 import { StorageError } from "@/domain/errors";
 import { logger } from "@/infrastructure/logging/logger";
 import {
@@ -10,8 +10,12 @@ import {
   getStorageRoot,
   getBrandsRoot,
   getAssetsRoot,
+  getBlobsRoot,
   getCacheRoot,
   getTempRoot,
+  getCanonicalBlobPath,
+  toStorageRelativePath,
+  resolveStoragePath,
 } from "./paths";
 
 async function ensureDir(dirPath: string): Promise<void> {
@@ -48,27 +52,17 @@ async function pathExists(target: string): Promise<boolean> {
   }
 }
 
-/**
- * Centralized filesystem operations for AIVA Studio. All storage access
- * (project workspaces, brand/asset/cache roots) is expected to go through
- * this service rather than calling `fs` directly elsewhere in the app.
- *
- * Every operation here is idempotent: re-running initialization or
- * re-creating an existing project's workspace is always safe and never
- * destroys existing files (mkdir with recursive:true is a no-op for
- * directories that already exist).
- */
 export const storageService = {
   /**
-   * Ensures the global storage skeleton exists: the root itself plus
-   * brands/, assets/, cache/, and temp/. Safe to call on every app
-   * startup (restart-safe, deterministic).
+   * Ensures the global storage skeleton exists: root plus brands/, assets/,
+   * assets/blobs/, cache/, and temp/. Safe to call on every app startup.
    */
   async initializeGlobalStorage(): Promise<void> {
     await ensureDir(getStorageRoot());
     await ensureDir(getProjectsRoot());
     await ensureDir(getBrandsRoot());
     await ensureDir(getAssetsRoot());
+    await ensureDir(getBlobsRoot());
     await ensureDir(getCacheRoot());
     await ensureDir(getTempRoot());
 
@@ -77,12 +71,7 @@ export const storageService = {
 
   /**
    * Writes and deletes a small probe file under the global temp root to
-   * confirm the storage root is actually writable, not merely present.
-   * `initializeGlobalStorage`/`initializeProjectWorkspace` only prove a
-   * directory *exists* — `mkdir(recursive: true)` on an already-existing
-   * directory tree succeeds even if that tree is read-only, which would
-   * otherwise let a read-only storage root report healthy right up until
-   * the first real write.
+   * confirm the storage root is actually writable.
    */
   async verifyWritable(): Promise<void> {
     await ensureDir(getTempRoot());
@@ -99,17 +88,7 @@ export const storageService = {
   },
 
   /**
-   * Creates the full per-project workspace tree under
-   * storage/projects/{projectId}/. Idempotent: calling this again for an
-   * existing project (e.g. after a restart) does not touch existing files.
-   *
-   * If any subdirectory fails to create, the whole call fails — but only
-   * if this call is what created the workspace root does it remove the
-   * partially-built tree afterward. A workspace that already existed
-   * before this call (e.g. a previously-succeeded init, or a directory a
-   * user manually restored) is never deleted just because a later
-   * subdirectory couldn't be created, which would otherwise violate
-   * idempotency.
+   * Creates the full per-project workspace tree under storage/projects/{projectId}/.
    */
   async initializeProjectWorkspace(projectId: string): Promise<string> {
     const workspacePath = getProjectWorkspacePath(projectId);
@@ -157,12 +136,6 @@ export const storageService = {
     return workspacePath;
   },
 
-  /**
-   * Returns whether a project's workspace directory exists on disk.
-   * Returns false ONLY when the directory genuinely does not exist (ENOENT).
-   * Throws a StorageError if access is denied or an I/O error occurs,
-   * avoiding false negatives for existing but inaccessible paths.
-   */
   async projectWorkspaceExists(projectId: string): Promise<boolean> {
     const workspacePath = getProjectWorkspacePath(projectId);
     try {
@@ -180,6 +153,115 @@ export const storageService = {
     }
   },
 
+  /**
+   * Stages an uploaded binary buffer safely into storage/temp/.
+   * Sanitizes originalFilename, calculates SHA-256 checksum, and returns file staging info.
+   */
+  async stageFile(fileBuffer: Buffer, originalFilename: string): Promise<{
+    tempPath: string;
+    sizeBytes: number;
+    checksum: string;
+    extension: string;
+    sanitizedFilename: string;
+  }> {
+    await ensureDir(getTempRoot());
+    const sanitizedFilename = path.basename(originalFilename).replace(/[^a-zA-Z0-9_.-]/g, "_");
+    const extension = path.extname(sanitizedFilename) || ".bin";
+    const tempPath = path.join(getTempRoot(), `upload-${randomUUID()}-${sanitizedFilename}`);
+
+    try {
+      await fs.writeFile(tempPath, fileBuffer);
+    } catch (error) {
+      throw new StorageError(`Failed to stage temporary upload file: ${sanitizedFilename}`, {
+        tempPath,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const checksum = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+
+    return {
+      tempPath,
+      sizeBytes: fileBuffer.length,
+      checksum,
+      extension,
+      sanitizedFilename,
+    };
+  },
+
+  /**
+   * Finalizes a staged upload file to its permanent canonical location:
+   * storage/assets/blobs/{checksum-prefix}/{checksum}.{ext}
+   * Returns relative storage path.
+   */
+  async finalizeBlob(tempPath: string, checksum: string, extension: string): Promise<{
+    canonicalAbsolutePath: string;
+    storageRelativePath: string;
+    isDuplicate: boolean;
+  }> {
+    const canonicalAbs = getCanonicalBlobPath(checksum, extension);
+    const targetDir = path.dirname(canonicalAbs);
+    await ensureDir(targetDir);
+
+    const alreadyExists = await pathExists(canonicalAbs);
+
+    if (alreadyExists) {
+      await this.removeTempFile(tempPath);
+      return {
+        canonicalAbsolutePath: canonicalAbs,
+        storageRelativePath: toStorageRelativePath(canonicalAbs),
+        isDuplicate: true,
+      };
+    }
+
+    try {
+      await fs.rename(tempPath, canonicalAbs);
+    } catch {
+      // Fallback for cross-device filesystem moves
+      try {
+        await fs.copyFile(tempPath, canonicalAbs);
+        await this.removeTempFile(tempPath);
+      } catch (copyError) {
+        await this.removeTempFile(tempPath);
+        throw new StorageError(`Failed to finalize canonical blob file at ${canonicalAbs}`, {
+          tempPath,
+          canonicalAbsolutePath: canonicalAbs,
+          cause: copyError instanceof Error ? copyError.message : String(copyError),
+        });
+      }
+    }
+
+    return {
+      canonicalAbsolutePath: canonicalAbs,
+      storageRelativePath: toStorageRelativePath(canonicalAbs),
+      isDuplicate: false,
+    };
+  },
+
+  /**
+   * Safely deletes a staged temporary file.
+   */
+  async removeTempFile(tempPath: string): Promise<void> {
+    try {
+      await fs.rm(tempPath, { force: true });
+    } catch (error) {
+      logger.error({
+        event: "storage.temp_file_cleanup_failed",
+        tempPath,
+        error,
+        message: "Failed to remove temporary file; file may be orphaned",
+      });
+      throw new StorageError(`Failed to remove temporary file: ${tempPath}`, {
+        tempPath,
+        partialUploadOrphaned: true,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+
+  pathExists,
   getStorageRoot,
   getProjectWorkspacePath,
+  toStorageRelativePath,
+  resolveStoragePath,
 };

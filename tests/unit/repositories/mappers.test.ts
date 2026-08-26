@@ -24,11 +24,20 @@ const baseSceneRow = {
 
 const baseAssetRow = {
   id: "asset_1",
+  title: null,
+  originalFilename: null,
   type: "SOURCE",
+  vaultRole: null,
   source: "LOCAL_UPLOAD",
   localPath: null,
+  mimeType: null,
+  sizeBytes: null,
+  checksum: null,
   metadata: null,
   projectId: null,
+  brandId: null,
+  productId: null,
+  blobId: null,
   createdAt: new Date(),
 };
 
