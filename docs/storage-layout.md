@@ -32,7 +32,19 @@ storage/
 
 - **Idempotent**: every directory is created with `fs.mkdir(path, { recursive: true })`,
   which is a no-op if the directory already exists. Re-running
-  initialization never deletes or truncates existing files.
+  initialization never deletes or truncates existing files. If a
+  subdirectory fails to create partway through
+  `initializeProjectWorkspace`, the partially-built tree is removed —
+  but only when this call is what created the workspace root; a
+  workspace that already existed before the call is never deleted just
+  because a later step failed.
+- **Verified writable, not just present**: `storageService.verifyWritable()`
+  writes and deletes a small probe file under the global temp root.
+  `GET /api/health` calls this in addition to
+  `initializeGlobalStorage()`, because `mkdir(recursive: true)` on an
+  already-existing tree succeeds even if that tree has since become
+  read-only — without the probe, health would keep reporting `OK` right
+  up until the first real write failed.
 - **Restart-safe**: `storageService.initializeGlobalStorage()` runs once
   per server process (cached via a module-level promise in
   `src/app/layout.tsx`) but is safe to call any number of times — on
@@ -57,6 +69,18 @@ been created, `ProjectService.createProject` deletes the row it just
 created so the system never ends up with a project that has no backing
 storage. This is the one place storage and database writes are
 coordinated; see `src/services/project.service.ts`.
+
+That rollback delete can itself fail (e.g. the database becomes
+unavailable at the same moment). That failure is never silently
+swallowed: it's logged as a distinct `project.rollback_failed` event, and
+`createProject` throws a `StorageError` with `details.orphaned: true`
+instead of the original workspace error, so it's possible to tell "the
+project was cleanly rejected" apart from "a project row now exists with
+no backing workspace and needs manual cleanup." The storage dependency
+(`ProjectWorkspaceInitializer`) and the rollback-capable `db` handle
+(`ProjectRollbackDb`) are both narrow, injectable interfaces specifically
+so tests can force this failure path without touching the real
+filesystem or database — see `tests/integration/project/project-crud.test.ts`.
 
 ## What TASK-001 does not do
 
