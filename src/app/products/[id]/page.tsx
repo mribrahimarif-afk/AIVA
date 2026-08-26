@@ -4,6 +4,7 @@ import { repositories } from "@/services/container";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { AliasManager } from "@/components/products/alias-manager";
+import { EditProductModal } from "@/components/products/edit-product-modal";
 import { UploadButtonModal } from "@/components/vault/upload-button-modal";
 
 export const dynamic = "force-dynamic";
@@ -45,7 +46,8 @@ export default async function ProductDetailPage(props: { params: Promise<{ id: s
           )}
         </div>
 
-        <div>
+        <div className="flex items-center gap-2">
+          <EditProductModal product={product} />
           <UploadButtonModal
             defaultRole="PRODUCT_VIDEO"
             brandId={product.brandId}
@@ -91,6 +93,10 @@ export default async function ProductDetailPage(props: { params: Promise<{ id: s
                   <Badge tone="neutral" className="text-[10px]">
                     {asset.vaultRole || asset.type}
                   </Badge>
+                </div>
+
+                <div className="mt-3 overflow-hidden rounded border border-neutral-800 bg-neutral-950 p-1">
+                  <video controls src={`/api/vault/${asset.id}/content`} className="h-32 w-full object-cover rounded" />
                 </div>
 
                 <div className="mt-3 flex items-center justify-between text-[11px] text-neutral-500 border-t border-neutral-800/60 pt-2">

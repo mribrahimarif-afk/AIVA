@@ -93,4 +93,8 @@ describe("toAsset", () => {
   it("throws DataIntegrityError for a corrupted source value", () => {
     expect(() => toAsset({ ...baseAssetRow, source: "NOT_A_SOURCE" })).toThrow(DataIntegrityError);
   });
+
+  it("throws DataIntegrityError for corrupt JSON in metadata column", () => {
+    expect(() => toAsset({ ...baseAssetRow, metadata: "{invalid_json:true" })).toThrow(DataIntegrityError);
+  });
 });

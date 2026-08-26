@@ -51,7 +51,9 @@ describe("Integration — Vault & Brand & Product Services", () => {
 
   it("uploads an asset to AIVA Vault and deduplicates identical binary content", async () => {
     const brand = await services.brand.createBrand({ name: "Puma", slug: "puma" });
-    const sampleBuffer = Buffer.from("SAMPLE_BINARY_VIDEO_DATA_9999");
+    const product = await services.product.createProduct({ brandId: brand.id, name: "Suede", slug: "suede" });
+    const mp4Header = Buffer.from("00000018667479706d70343200000000", "hex");
+    const sampleBuffer = Buffer.concat([mp4Header, Buffer.from("SAMPLE_BINARY_VIDEO_DATA_9999")]);
 
     // 1st Upload
     const result1 = await services.vault.uploadAsset({
@@ -59,7 +61,7 @@ describe("Integration — Vault & Brand & Product Services", () => {
       originalFilename: "promo1.mp4",
       mimeType: "video/mp4",
       vaultRole: "PRODUCT_VIDEO",
-      brandId: brand.id,
+      productId: product.id,
     });
 
     expect(result1.isDuplicate).toBe(false);
@@ -73,7 +75,7 @@ describe("Integration — Vault & Brand & Product Services", () => {
       originalFilename: "promo1_copy.mp4",
       mimeType: "video/mp4",
       vaultRole: "PRODUCT_VIDEO",
-      brandId: brand.id,
+      productId: product.id,
       title: "Second Upload Title",
     });
 
@@ -93,12 +95,14 @@ describe("Integration — Vault & Brand & Product Services", () => {
 
   it("rejects invalid role file extensions", async () => {
     const sampleBuffer = Buffer.from("EXEC_SCRIPT_DATA");
+    const brand = await services.brand.createBrand({ name: "Puma Logo Brand", slug: "puma-logo" });
     await expect(
       services.vault.uploadAsset({
         fileBuffer: sampleBuffer,
         originalFilename: "script.sh",
         mimeType: "text/x-shellscript",
         vaultRole: "BRAND_LOGO",
+        brandId: brand.id,
       })
     ).rejects.toThrow(ValidationError);
   });
@@ -111,9 +115,12 @@ describe("Integration — Vault & Brand & Product Services", () => {
       slug: "nano-x",
     });
 
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const mp4Header = Buffer.from("00000018667479706d70343200000000", "hex");
+
     // Upload Logo
     await services.vault.uploadAsset({
-      fileBuffer: Buffer.from("LOGO_DATA_1"),
+      fileBuffer: Buffer.concat([pngHeader, Buffer.from("LOGO_DATA_1")]),
       originalFilename: "logo.png",
       mimeType: "image/png",
       vaultRole: "BRAND_LOGO",
@@ -122,11 +129,10 @@ describe("Integration — Vault & Brand & Product Services", () => {
 
     // Upload Product Video
     await services.vault.uploadAsset({
-      fileBuffer: Buffer.from("VIDEO_DATA_1"),
+      fileBuffer: Buffer.concat([mp4Header, Buffer.from("VIDEO_DATA_1")]),
       originalFilename: "nano.mp4",
       mimeType: "video/mp4",
       vaultRole: "PRODUCT_VIDEO",
-      brandId: brand.id,
       productId: product.id,
     });
 

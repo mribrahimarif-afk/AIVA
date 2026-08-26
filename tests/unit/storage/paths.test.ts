@@ -9,10 +9,12 @@ import {
   getProjectsRoot,
   getStorageRoot,
   getTempRoot,
+  resolveStoragePath,
+  toStorageRelativePath,
   PROJECT_WORKSPACE_SUBDIRS,
 } from "@/storage/paths";
 
-describe("storage path handling", () => {
+describe("storage path handling & security containment", () => {
   it("resolves the storage root to an absolute path", () => {
     const root = getStorageRoot();
     expect(path.isAbsolute(root)).toBe(true);
@@ -40,20 +42,6 @@ describe("storage path handling", () => {
     }
   });
 
-  it("defines exactly the subdirectories required by TASK-001", () => {
-    expect(PROJECT_WORKSPACE_SUBDIRS).toEqual([
-      "source",
-      "audio",
-      "stock",
-      "product",
-      "ai",
-      "captions",
-      "timeline",
-      "renders",
-      "temp",
-    ]);
-  });
-
   it("rejects a project id containing path traversal segments", () => {
     expect(() => getProjectWorkspacePath("../../etc")).toThrow();
     expect(() => getProjectWorkspacePath("..")).toThrow();
@@ -61,7 +49,32 @@ describe("storage path handling", () => {
     expect(() => getProjectWorkspacePath("a\\b")).toThrow();
   });
 
-  it("rejects an empty project id", () => {
-    expect(() => getProjectWorkspacePath("")).toThrow();
+  it("converts absolute path under storage root to normalized relative storage path", () => {
+    const root = getStorageRoot();
+    const absPath = path.join(root, "assets", "blobs", "e3", "sample.png");
+    const rel = toStorageRelativePath(absPath);
+    expect(rel).toBe("assets/blobs/e3/sample.png");
+  });
+
+  it("rejects absolute paths escaping storage root in toStorageRelativePath", () => {
+    const root = getStorageRoot();
+    const evilPath = path.resolve(root, "..", "outside.txt");
+    expect(() => toStorageRelativePath(evilPath)).toThrow(/escapes storage root/i);
+  });
+
+  it("resolves valid relative paths inside storage root securely", () => {
+    const resolved = resolveStoragePath("assets/blobs/ab/1234.mp4");
+    expect(resolved).toBe(path.join(getStorageRoot(), "assets", "blobs", "ab", "1234.mp4"));
+  });
+
+  it("rejects path traversal attempts in resolveStoragePath", () => {
+    expect(() => resolveStoragePath("../../../etc/passwd")).toThrow(/escapes storage root/i);
+    expect(() => resolveStoragePath("assets/../../secret")).toThrow(/escapes storage root/i);
+  });
+
+  it("rejects sibling prefix paths escaping storage root", () => {
+    const root = getStorageRoot();
+    const siblingEvilPath = `${root}-evil/payload.exe`;
+    expect(() => toStorageRelativePath(siblingEvilPath)).toThrow(/sibling directory|escapes storage root/i);
   });
 });

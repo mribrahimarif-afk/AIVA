@@ -1,10 +1,6 @@
 import path from "node:path";
 import { getEnv } from "@/infrastructure/config/env";
 
-/**
- * Per-project subdirectories created under storage/projects/{id}/ on
- * project creation.
- */
 export const PROJECT_WORKSPACE_SUBDIRS = [
   "source",
   "audio",
@@ -18,8 +14,6 @@ export const PROJECT_WORKSPACE_SUBDIRS = [
 ] as const;
 
 export type ProjectWorkspaceSubdir = (typeof PROJECT_WORKSPACE_SUBDIRS)[number];
-
-/** Top-level directories that must exist regardless of any project. */
 export const GLOBAL_STORAGE_DIRS = ["brands", "assets", "cache", "temp"] as const;
 
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
@@ -31,17 +25,12 @@ function assertSafeSegment(segment: string, label: string): void {
   }
 }
 
-/**
- * Resolves the configured storage root to an absolute, OS-native path.
- * A relative AIVA_STORAGE_ROOT is resolved against the current working
- * directory (the project root when run via `npm run dev`/`start`), so no
- * machine-specific path is ever hard-coded.
- */
 export function getStorageRoot(): string {
   const env = getEnv();
-  return path.isAbsolute(env.AIVA_STORAGE_ROOT)
+  const rawRoot = path.isAbsolute(env.AIVA_STORAGE_ROOT)
     ? path.normalize(env.AIVA_STORAGE_ROOT)
     : path.resolve(process.cwd(), env.AIVA_STORAGE_ROOT);
+  return path.normalize(rawRoot);
 }
 
 export function getProjectsRoot(): string {
@@ -89,22 +78,57 @@ export function getCanonicalBlobPath(checksum: string, extension: string): strin
   return path.join(getBlobsRoot(), prefix, `${checksum.toLowerCase()}${cleanExt}`);
 }
 
+/**
+ * Converts an absolute filesystem path under storage root to a normalized, POSIX-style storage-relative path.
+ * Throws an Error if the path escapes or lies outside the storage root.
+ */
 export function toStorageRelativePath(absolutePath: string): string {
   const root = getStorageRoot();
   const normalizedAbs = path.normalize(absolutePath);
-  const normalizedRoot = path.normalize(root);
 
-  if (normalizedAbs.startsWith(normalizedRoot)) {
-    const rel = path.relative(normalizedRoot, normalizedAbs);
-    return rel.replace(/\\/g, "/");
+  const rel = path.relative(root, normalizedAbs);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Path '${absolutePath}' escapes storage root '${root}'`);
   }
 
-  return absolutePath.replace(/\\/g, "/");
+  // Ensure sibling directory with matching prefix fails (e.g. /storage-evil vs /storage)
+  if (normalizedAbs.length > root.length) {
+    const nextChar = normalizedAbs.charAt(root.length);
+    if (nextChar !== path.sep) {
+      throw new Error(`Path '${absolutePath}' lies in sibling directory outside storage root '${root}'`);
+    }
+  }
+
+  return rel.replace(/\\/g, "/");
 }
 
+/**
+ * Safely resolves a storage-relative path to an absolute path inside AIVA_STORAGE_ROOT.
+ * Rejects absolute path inputs, path traversal (`../`), and outside-root escapes.
+ */
 export function resolveStoragePath(relativePath: string): string {
-  if (path.isAbsolute(relativePath)) {
-    return path.normalize(relativePath);
+  if (!relativePath || typeof relativePath !== "string") {
+    throw new Error("Relative storage path must be a non-empty string");
   }
-  return path.join(getStorageRoot(), relativePath);
+
+  if (path.isAbsolute(relativePath)) {
+    // If it's already an absolute path, verify strict containment inside storage root
+    const root = getStorageRoot();
+    const normalizedAbs = path.normalize(relativePath);
+    const rel = path.relative(root, normalizedAbs);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+      throw new Error(`Absolute path '${relativePath}' escapes storage root '${root}'`);
+    }
+    return normalizedAbs;
+  }
+
+  const root = getStorageRoot();
+  const resolved = path.resolve(root, relativePath);
+  const rel = path.relative(root, resolved);
+
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Relative storage path '${relativePath}' escapes storage root '${root}'`);
+  }
+
+  return resolved;
 }

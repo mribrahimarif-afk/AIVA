@@ -110,6 +110,18 @@ export function toScene(row: PrismaScene): Scene {
 }
 
 export function toAsset(row: PrismaAsset): Asset {
+  let parsedMetadata: Record<string, unknown> | null = null;
+  if (row.metadata) {
+    try {
+      parsedMetadata = JSON.parse(row.metadata) as Record<string, unknown>;
+    } catch {
+      throw new DataIntegrityError("Invalid JSON in persisted Asset metadata", {
+        recordId: row.id,
+        field: "Asset.metadata",
+      });
+    }
+  }
+
   return {
     id: row.id,
     title: row.title ?? null,
@@ -123,7 +135,7 @@ export function toAsset(row: PrismaAsset): Asset {
     mimeType: row.mimeType ?? null,
     sizeBytes: row.sizeBytes ?? null,
     checksum: row.checksum ?? null,
-    metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : null,
+    metadata: parsedMetadata,
     projectId: row.projectId ?? null,
     brandId: row.brandId ?? null,
     productId: row.productId ?? null,

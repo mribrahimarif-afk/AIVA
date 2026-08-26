@@ -5,7 +5,7 @@ import type { AssetRepository, VaultAssetFilter } from "@/repositories/asset.rep
 import type { ContentBlobRepository } from "@/repositories/content-blob.repository";
 import type { BrandRepository } from "@/repositories/brand.repository";
 import type { ProductRepository } from "@/repositories/product.repository";
-import { storageService } from "@/storage/storage.service";
+import { storageService, type StagedUploadResult } from "@/storage/storage.service";
 import { logger } from "@/infrastructure/logging/logger";
 
 export interface UploadVaultAssetInput {
@@ -45,36 +45,48 @@ export function createVaultService(
       }
       const role = roleResult.data;
 
-      try {
-        validateRoleFile(input.originalFilename, input.mimeType, role);
-      } catch (validationErr) {
-        throw new ValidationError(
-          validationErr instanceof Error ? validationErr.message : String(validationErr),
-          { originalFilename: input.originalFilename, mimeType: input.mimeType, role }
-        );
-      }
+      // Ownership invariant enforcement
+      let resolvedBrandId = input.brandId ?? null;
+      const resolvedProductId = input.productId ?? null;
 
-      if (input.brandId) {
-        const brand = await brandRepo.findById(input.brandId);
-        if (!brand) {
-          throw new NotFoundError(`Brand with id '${input.brandId}' not found`, {
-            brandId: input.brandId,
+      if (role === "BRAND_LOGO") {
+        if (!resolvedBrandId) {
+          throw new ValidationError("brandId is required for BRAND_LOGO vault role", { role });
+        }
+        if (resolvedProductId) {
+          throw new ValidationError("productId is not permitted for BRAND_LOGO vault role", {
+            role,
+            productId: resolvedProductId,
           });
         }
       }
 
-      if (input.productId) {
-        const product = await productRepo.findById(input.productId);
+      if (role === "PRODUCT_VIDEO") {
+        if (!resolvedProductId) {
+          throw new ValidationError("productId is required for PRODUCT_VIDEO vault role", { role });
+        }
+      }
+
+      if (resolvedProductId) {
+        const product = await productRepo.findById(resolvedProductId);
         if (!product) {
-          throw new NotFoundError(`Product with id '${input.productId}' not found`, {
-            productId: input.productId,
+          throw new NotFoundError(`Product with id '${resolvedProductId}' not found`, {
+            productId: resolvedProductId,
           });
         }
-        if (input.brandId && product.brandId !== input.brandId) {
+        if (resolvedBrandId && product.brandId !== resolvedBrandId) {
           throw new ValidationError(
-            `Product '${product.id}' does not belong to brand '${input.brandId}'`,
-            { productId: product.id, brandId: input.brandId }
+            `Product '${product.id}' does not belong to brand '${resolvedBrandId}'`,
+            { productId: product.id, brandId: resolvedBrandId }
           );
+        }
+        resolvedBrandId = product.brandId;
+      } else if (resolvedBrandId) {
+        const brand = await brandRepo.findById(resolvedBrandId);
+        if (!brand) {
+          throw new NotFoundError(`Brand with id '${resolvedBrandId}' not found`, {
+            brandId: resolvedBrandId,
+          });
         }
       }
 
@@ -82,19 +94,12 @@ export function createVaultService(
         event: "vault.upload_started",
         originalFilename: input.originalFilename,
         role,
-        brandId: input.brandId ?? null,
-        productId: input.productId ?? null,
+        brandId: resolvedBrandId,
+        productId: resolvedProductId,
         message: `Starting upload for '${input.originalFilename}' as ${role}`,
       });
 
-      let stagedInfo: {
-        tempPath: string;
-        sizeBytes: number;
-        checksum: string;
-        extension: string;
-        sanitizedFilename: string;
-      };
-
+      let stagedInfo: StagedUploadResult;
       try {
         stagedInfo = await storageService.stageFile(input.fileBuffer, input.originalFilename);
       } catch (stageErr) {
@@ -107,7 +112,25 @@ export function createVaultService(
         throw stageErr;
       }
 
-      const { tempPath, sizeBytes, checksum, extension } = stagedInfo;
+      const { tempPath, sizeBytes, checksum, extension, leadingBuffer } = stagedInfo;
+
+      let validationResult: { detectedExt: string | null; detectedMime: string | null };
+      try {
+        validationResult = validateRoleFile(input.originalFilename, input.mimeType, role, leadingBuffer);
+      } catch (validationErr) {
+        await storageService.removeTempFile(tempPath);
+        throw new ValidationError(
+          validationErr instanceof Error ? validationErr.message : String(validationErr),
+          { originalFilename: input.originalFilename, mimeType: input.mimeType, role }
+        );
+      }
+
+      const canonicalExtension = validationResult.detectedExt
+        ? `.${validationResult.detectedExt}`
+        : extension;
+
+      let isNewCanonicalFileCreated = false;
+      let createdCanonicalAbsPath: string | null = null;
 
       try {
         const existingBlob = await blobRepo.findByChecksum(checksum);
@@ -124,15 +147,15 @@ export function createVaultService(
             vaultRole: role,
             source: "LOCAL_UPLOAD",
             localPath: existingBlob.storagePath,
-            mimeType: input.mimeType || existingBlob.mimeType,
+            mimeType: validationResult.detectedMime || input.mimeType || existingBlob.mimeType,
             sizeBytes,
             checksum,
             metadata: {
               reused: true,
               deduplicated: true,
             },
-            brandId: input.brandId ?? null,
-            productId: input.productId ?? null,
+            brandId: resolvedBrandId,
+            productId: resolvedProductId,
             blobId: existingBlob.id,
           });
 
@@ -149,7 +172,9 @@ export function createVaultService(
           return { asset, isDuplicate: true };
         }
 
-        const finalized = await storageService.finalizeBlob(tempPath, checksum, extension);
+        const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
+        isNewCanonicalFileCreated = finalized.isNewCanonicalFile;
+        createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
 
         let blob = await blobRepo.findByChecksum(checksum);
         if (!blob) {
@@ -158,7 +183,7 @@ export function createVaultService(
               checksum,
               storagePath: finalized.storageRelativePath,
               sizeBytes,
-              mimeType: input.mimeType || "application/octet-stream",
+              mimeType: validationResult.detectedMime || input.mimeType || "application/octet-stream",
             });
           } catch (dbErr) {
             blob = await blobRepo.findByChecksum(checksum);
@@ -179,15 +204,15 @@ export function createVaultService(
           vaultRole: role,
           source: "LOCAL_UPLOAD",
           localPath: blob.storagePath,
-          mimeType: input.mimeType || blob.mimeType,
+          mimeType: validationResult.detectedMime || input.mimeType || blob.mimeType,
           sizeBytes,
           checksum,
           metadata: {
             reused: false,
             deduplicated: false,
           },
-          brandId: input.brandId ?? null,
-          productId: input.productId ?? null,
+          brandId: resolvedBrandId,
+          productId: resolvedProductId,
           blobId: blob.id,
         });
 
@@ -204,6 +229,15 @@ export function createVaultService(
         return { asset, isDuplicate: false };
       } catch (err) {
         await storageService.removeTempFile(tempPath).catch(() => {});
+
+        // Safe compensation if THIS upload created an otherwise unreferenced new canonical file
+        if (isNewCanonicalFileCreated && createdCanonicalAbsPath) {
+          const existingBlobCount = await blobRepo.findByChecksum(checksum);
+          if (!existingBlobCount) {
+            await storageService.compensateCanonicalBlob(createdCanonicalAbsPath).catch(() => {});
+          }
+        }
+
         logger.error({
           event: "vault.upload_failed",
           originalFilename: input.originalFilename,

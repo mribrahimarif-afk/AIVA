@@ -63,7 +63,8 @@ describe("API Integration — Brands, Products & Vault", () => {
     const brand = await services.brand.createBrand({ name: "LG", slug: "lg" });
 
     const formData = new FormData();
-    const file = new File(["AUDIO_BINARY_STREAM_CONTENT"], "jingle.mp3", { type: "audio/mpeg" });
+    const mp3Buffer = Buffer.from("ID3040000000000_AUDIO_STREAM_BINARY_DATA", "utf-8");
+    const file = new File([mp3Buffer], "jingle.mp3", { type: "audio/mpeg" });
     formData.append("file", file);
     formData.append("vaultRole", "MUSIC");
     formData.append("brandId", brand.id);

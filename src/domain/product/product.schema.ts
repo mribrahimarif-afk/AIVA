@@ -2,11 +2,17 @@ import { z } from "zod";
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/**
+ * Normalizes a product alias string deterministically with full Unicode support (Urdu, Roman Urdu, English).
+ * Trims, NFKC normalizes, lowercases, preserves Unicode letters (\p{L}) and numbers (\p{N}),
+ * converts punctuation to spaces, and collapses consecutive spaces.
+ */
 export function normalizeAlias(alias: string): string {
-  return alias
-    .trim()
+  if (!alias) return "";
+  const normalized = alias.trim().normalize("NFKC");
+  return normalized
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

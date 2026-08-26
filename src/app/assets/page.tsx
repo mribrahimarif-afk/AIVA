@@ -22,6 +22,9 @@ export default async function AssetsPage(props: {
   });
 
   const brands = await repositories.brand.findAll();
+  const products = selectedBrandId
+    ? await repositories.product.findByBrandId(selectedBrandId)
+    : [];
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
@@ -77,6 +80,26 @@ export default async function AssetsPage(props: {
             </select>
           </div>
 
+          {selectedBrandId && products.length > 0 && (
+            <div>
+              <label className="block text-[11px] font-medium text-neutral-400 mb-1">
+                Filter Product
+              </label>
+              <select
+                name="productId"
+                defaultValue={selectedProductId || ""}
+                className="rounded border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-xs text-neutral-200 focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="">All Products</option>
+                {products.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="flex items-end gap-2 mt-[18px]">
             <button
               type="submit"
@@ -106,6 +129,11 @@ export default async function AssetsPage(props: {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {assets.map((asset) => {
             const isReused = (asset.metadata as Record<string, unknown> | null)?.reused === true;
+            const mime = asset.mimeType?.toLowerCase() || "";
+            const isImage = mime.startsWith("image/");
+            const isVideo = mime.startsWith("video/");
+            const isAudio = mime.startsWith("audio/");
+
             return (
               <Card key={asset.id} className="p-4 flex flex-col justify-between">
                 <div>
@@ -123,6 +151,32 @@ export default async function AssetsPage(props: {
                     </Badge>
                   </div>
 
+                  {/* Browser Media Previews */}
+                  <div className="mt-3 overflow-hidden rounded border border-neutral-800 bg-neutral-950 p-2">
+                    {isImage && (
+                      <img
+                        src={`/api/vault/${asset.id}/content`}
+                        alt={asset.title || "Asset"}
+                        className="h-32 w-full object-contain"
+                      />
+                    )}
+                    {isVideo && (
+                      <video
+                        controls
+                        src={`/api/vault/${asset.id}/content`}
+                        className="h-32 w-full object-cover rounded"
+                      />
+                    )}
+                    {isAudio && (
+                      <audio controls src={`/api/vault/${asset.id}/content`} className="w-full mt-2" />
+                    )}
+                    {!isImage && !isVideo && !isAudio && (
+                      <div className="flex h-16 items-center justify-center text-xs text-neutral-500 font-mono">
+                        {asset.vaultRole || "FILE"}
+                      </div>
+                    )}
+                  </div>
+
                   {isReused && (
                     <div className="mt-2">
                       <Badge tone="success" className="text-[9px]">
@@ -132,7 +186,7 @@ export default async function AssetsPage(props: {
                   )}
 
                   {asset.checksum && (
-                    <div className="mt-3 font-mono text-[10px] text-neutral-600 truncate">
+                    <div className="mt-2 font-mono text-[10px] text-neutral-600 truncate">
                       SHA: {asset.checksum.substring(0, 16)}...
                     </div>
                   )}

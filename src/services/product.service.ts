@@ -1,5 +1,16 @@
-import type { Product, ProductAlias, CreateProductInput, AddAliasInput } from "@/domain/product";
-import { createProductSchema, addAliasSchema, normalizeAlias } from "@/domain/product";
+import type {
+  Product,
+  ProductAlias,
+  CreateProductInput,
+  UpdateProductInput,
+  AddAliasInput,
+} from "@/domain/product";
+import {
+  createProductSchema,
+  updateProductSchema,
+  addAliasSchema,
+  normalizeAlias,
+} from "@/domain/product";
 import { slugify } from "@/domain/brand/brand.schema";
 import { ValidationError, NotFoundError } from "@/domain/errors";
 import type { ProductRepository } from "@/repositories/product.repository";
@@ -9,6 +20,7 @@ import { logger } from "@/infrastructure/logging/logger";
 export interface ProductService {
   createProduct(input: CreateProductInput): Promise<Product>;
   getProduct(id: string): Promise<Product>;
+  updateProduct(id: string, input: UpdateProductInput): Promise<Product>;
   listProductsByBrand(brandId: string): Promise<Product[]>;
   addAlias(input: AddAliasInput): Promise<ProductAlias>;
   removeAlias(aliasId: string): Promise<void>;
@@ -73,6 +85,51 @@ export function createProductService(
         throw new NotFoundError(`Product with id '${id}' not found`, { productId: id });
       }
       return product;
+    },
+
+    async updateProduct(id, input) {
+      const product = await productRepo.findById(id);
+      if (!product) {
+        throw new NotFoundError(`Product with id '${id}' not found`, { productId: id });
+      }
+
+      const parseResult = updateProductSchema.safeParse(input);
+      if (!parseResult.success) {
+        throw new ValidationError("Invalid product update input", {
+          issues: parseResult.error.issues,
+        });
+      }
+
+      const newSlug = parseResult.data.slug
+        ? slugify(parseResult.data.slug)
+        : parseResult.data.name
+        ? slugify(parseResult.data.name)
+        : undefined;
+
+      if (newSlug && newSlug !== product.slug) {
+        const existing = await productRepo.findByBrandAndSlug(product.brandId, newSlug);
+        if (existing && existing.id !== id) {
+          throw new ValidationError(
+            `Product with slug '${newSlug}' already exists under brand`,
+            { brandId: product.brandId, slug: newSlug }
+          );
+        }
+      }
+
+      const updated = await productRepo.update(id, {
+        name: parseResult.data.name,
+        slug: newSlug,
+        description: parseResult.data.description,
+      });
+
+      logger.info({
+        event: "product.updated",
+        productId: updated.id,
+        brandId: updated.brandId,
+        message: `Updated product '${updated.name}'`,
+      });
+
+      return updated;
     },
 
     async listProductsByBrand(brandId) {

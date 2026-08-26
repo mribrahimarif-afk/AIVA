@@ -3,118 +3,51 @@
 **A**utonomous **I**ntelligent **V**ideo **A**ssembly & Asset Intelligence Engine.
 
 AIVA Studio is a personal-use application for assembling video projects from
-scripts, voice, and stock/AI-generated assets. This repository currently
-contains **TASK-001: foundation** — the application architecture, database,
-storage workspace management, domain models, settings, health diagnostics,
-logging, and a minimal UI. No AI/voice/stock provider, rendering, or
-scene-intelligence functionality is implemented yet (see
-[docs/architecture.md](docs/architecture.md) for scope and non-goals).
+scripts, voice, and stock/AI-generated assets.
+
+This repository contains **TASK-001** (foundation) & **TASK-002** (AIVA Vault: Brand, Product & Media Asset Library).
 
 ## Prerequisites
 
 - Node.js 20 or later
 - npm 10 or later
-- (Optional) FFmpeg installed and on your `PATH`, or a path to an FFmpeg
-  binary — used only for detection/health reporting in this task, not
-  rendering.
+- (Optional) FFmpeg installed on `PATH` or configured via `AIVA_FFMPEG_PATH`.
 
-## Installation
+## Installation & Deterministic Local Setup
 
-```bash
-npm install
-```
-
-`npm install` also runs `prisma generate` via `postinstall`, so the Prisma
-client is ready immediately after install.
-
-## Environment setup
-
-Copy the example environment file and adjust values as needed:
+To set up a fresh local workspace deterministically from clone:
 
 ```bash
+npm ci
 cp .env.example .env
-```
-
-See [.env.example](.env.example) for the full list of variables. The
-defaults work out of the box for local development:
-
-- `DATABASE_URL` — SQLite file location (defaults to `./prisma/dev.db`)
-- `AIVA_STORAGE_ROOT` — root directory for all managed files (defaults to
-  `./storage`)
-- `AIVA_FFMPEG_PATH` — optional explicit FFmpeg binary path
-- `AIVA_DEFAULT_ASPECT_RATIO` — one of `9:16` | `16:9` | `1:1`
-- `AIVA_LOG_LEVEL` — one of `debug` | `info` | `warn` | `error`
-- `GEMINI_API_KEY`, `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`,
-  `PEXELS_API_KEY`, `PIXABAY_API_KEY` — placeholders only. TASK-001 never
-  reads or uses these; they exist so the Settings screen can report
-  configuration status ahead of the provider integrations that will use
-  them in later tasks.
-
-Never commit your real `.env` file.
-
-## Database setup
-
-The database schema is managed with Prisma migrations against a local
-SQLite file.
-
-```bash
-npx prisma migrate dev
-```
-
-This creates `prisma/dev.db` (or your configured `DATABASE_URL`) and
-applies all migrations in `prisma/migrations/`. Re-running it is safe.
-
-## Development
-
-```bash
+npx prisma generate
+npx prisma migrate deploy
 npm run dev
 ```
 
-Then open http://localhost:3000. On first request, the app deterministically
-creates the global storage skeleton (`storage/projects`, `storage/brands`,
-`storage/assets`, `storage/cache`, `storage/temp`) if it doesn't already
-exist — see [docs/storage-layout.md](docs/storage-layout.md).
+`npx prisma migrate deploy` ensures `prisma/dev.db` is created and all migrations (`20260826121100_init`, `20260827020000_vault_brand_product_assets`) are applied cleanly before startup. `src/infrastructure/db/client.ts` automatically creates the parent `prisma/` directory if missing, preventing SQLite Error Code 14 (`Unable to open the database file`).
 
-Other useful scripts:
+## Environment Configuration
 
-```bash
-npm run typecheck   # tsc --noEmit
-npm run lint        # next lint
-```
+Key configuration options in [.env.example](.env.example):
 
-## Tests
+- `DATABASE_URL` — SQLite file location (default: `file:./prisma/dev.db`)
+- `AIVA_STORAGE_ROOT` — root directory for all managed files (default: `./storage`)
+- `AIVA_MAX_UPLOAD_BYTES` — maximum upload payload size in bytes (default: `524288000` = 500 MB)
+- `AIVA_DEFAULT_ASPECT_RATIO` — default aspect ratio (`9:16` | `16:9` | `1:1`)
+- `AIVA_LOG_LEVEL` — logging level (`debug` | `info` | `warn` | `error`)
 
-```bash
-npm test
-```
-
-Runs the full unit + integration suite once with Vitest. Integration tests
-apply real Prisma migrations to an isolated `prisma/test.db` (created and
-torn down automatically) and exercise a scratch `.test-storage/` directory,
-so they never touch your development database or storage root.
+## Key Commands
 
 ```bash
-npm run test:watch  # watch mode
-```
-
-## Build
-
-```bash
-npm run build
-```
-
-Produces a production build (`next build`), including a full TypeScript
-type check.
-
-```bash
-npm start   # run the production build
+npm run dev        # Starts Next.js dev server on http://localhost:3000
+npm run typecheck  # TypeScript strict type checking
+npm run lint       # ESLint lint check
+npm test           # Vitest unit & integration test suite
+npm run build      # Next.js production build
 ```
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — layering, module
-  boundaries, provider abstractions, and TASK-001 scope/non-goals
-- [docs/development.md](docs/development.md) — day-to-day development
-  workflow, conventions, and testing strategy
-- [docs/storage-layout.md](docs/storage-layout.md) — on-disk storage
-  layout and the guarantees the storage service provides
+- [docs/architecture.md](docs/architecture.md) — system architecture, Vault Brand/Product model, and error handling
+- [docs/storage-layout.md](docs/storage-layout.md) — on-disk storage layout, content-addressable blobs, and deduplication guarantees
