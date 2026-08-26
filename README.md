@@ -31,7 +31,7 @@ npm run dev
 
 Key configuration options in [.env.example](.env.example):
 
-- `DATABASE_URL` — SQLite file location (default: `file:./prisma/dev.db`)
+- `DATABASE_URL` — SQLite file location (default: `file:./dev.db`, which resolves to `<repo>/prisma/dev.db`)
 - `AIVA_STORAGE_ROOT` — root directory for all managed files (default: `./storage`)
 - `AIVA_MAX_UPLOAD_BYTES` — maximum upload payload size in bytes (default: `524288000` = 500 MB)
 - `AIVA_DEFAULT_ASPECT_RATIO` — default aspect ratio (`9:16` | `16:9` | `1:1`)

@@ -75,26 +75,42 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         fileStream.resume();
         throw err;
       });
+      // Attach quiet handler to prevent unhandled rejection warning during async busboy parsing
+      stagedInfoPromise.catch(() => {});
     });
 
     const nodeStream = Readable.fromWeb(request.body as unknown as Parameters<typeof Readable.fromWeb>[0]);
 
-    await new Promise<void>((resolve, reject) => {
-      bb.on("finish", resolve);
-      bb.on("error", (err) => reject(err));
-      nodeStream.on("error", (err) => reject(err));
-      nodeStream.pipe(bb);
-    });
-
-    if (streamError) {
-      throw streamError;
+    let busboyError: Error | null = null;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        bb.on("finish", resolve);
+        bb.on("error", (err) => reject(err));
+        nodeStream.on("error", (err) => reject(err));
+        nodeStream.pipe(bb);
+      });
+    } catch (err) {
+      busboyError = err instanceof Error ? err : new Error(String(err));
     }
 
-    if (!stagedInfoPromise || !uploadedFileInfo) {
+    // ALWAYS settle and resolve stagedInfoPromise if initiated so it never escapes unobserved
+    if (stagedInfoPromise) {
+      try {
+        stagedInfo = await stagedInfoPromise;
+      } catch (stageErr) {
+        if (!streamError && !busboyError) {
+          streamError = stageErr instanceof Error ? stageErr : new Error(String(stageErr));
+        }
+      }
+    }
+
+    if (busboyError) throw busboyError;
+    if (streamError) throw streamError;
+
+    if (!stagedInfo || !uploadedFileInfo) {
       throw new ValidationError("No valid file uploaded in multipart form data");
     }
 
-    stagedInfo = await stagedInfoPromise;
     const info: UploadFileInfo = uploadedFileInfo;
 
     const vaultRole = fields["vaultRole"] as VaultRole;

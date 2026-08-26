@@ -227,11 +227,21 @@ export function createVaultService(
 
         let createdByThisUpload = false;
         let createdCanonicalAbsPath: string | null = null;
+        let tempCleanupStillFailed = false;
 
         try {
           const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
           createdByThisUpload = finalized.createdByThisUpload;
           createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
+
+          // If Phase B temp cleanup failed inside finalizeBlob, perform service-level outer retry
+          if (finalized.tempCleanupFailed) {
+            try {
+              await storageService.removeTempFile(tempPath);
+            } catch {
+              tempCleanupStillFailed = true;
+            }
+          }
 
           let blob = await blobRepo.findByChecksum(checksum);
           if (!blob) {
@@ -263,6 +273,20 @@ export function createVaultService(
             productId: resolvedProductId,
             blobId: blob.id,
           });
+
+          if (tempCleanupStillFailed) {
+            const msg = createdByThisUpload
+              ? `Canonical file created successfully at ${createdCanonicalAbsPath}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`
+              : `Canonical file already exists at ${createdCanonicalAbsPath}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`;
+
+            throw new StorageError(msg, {
+              canonicalCreated: true,
+              createdByThisUpload,
+              partialUploadOrphaned: true,
+              tempPath,
+              canonicalAbsolutePath: createdCanonicalAbsPath,
+            });
+          }
 
           logger.info({
             event: createdByThisUpload ? "vault.asset_stored" : "vault.duplicate_reused",

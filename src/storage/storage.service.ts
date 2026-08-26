@@ -56,6 +56,16 @@ export interface StagedUploadResult {
   leadingBuffer: Buffer;
 }
 
+export interface FinalizeBlobResult {
+  canonicalAbsolutePath: string;
+  storageRelativePath: string;
+  isDuplicate: boolean;
+  isNewCanonicalFile: boolean;
+  createdByThisUpload: boolean;
+  tempCleanupFailed: boolean;
+  tempCleanupErrorMessage?: string;
+}
+
 export const storageService = {
   async initializeGlobalStorage(): Promise<void> {
     await ensureDir(getStorageRoot());
@@ -290,19 +300,13 @@ export const storageService = {
    * Explicit 2-Phase Finalize State Machine:
    * Phase A: Exclusive canonical file creation (COPYFILE_EXCL).
    * Phase B: Temp file cleanup.
-   * Never loses creator state or reports creation failure if Phase A succeeded but Phase B temp cleanup failed.
+   * Returns a structured FinalizeBlobResult so creator state is never lost if Phase B fails.
    */
   async finalizeBlob(
     tempPath: string,
     checksum: string,
     canonicalExtension: string
-  ): Promise<{
-    canonicalAbsolutePath: string;
-    storageRelativePath: string;
-    isDuplicate: boolean;
-    isNewCanonicalFile: boolean;
-    createdByThisUpload: boolean;
-  }> {
+  ): Promise<FinalizeBlobResult> {
     const canonicalAbs = getCanonicalBlobPath(checksum, canonicalExtension);
     const targetDir = path.dirname(canonicalAbs);
     await ensureDir(targetDir);
@@ -327,7 +331,7 @@ export const storageService = {
       }
     }
 
-    // Phase A Failed (non-EEXIST) -> Attempt temp cleanup and surface Phase A error
+    // Phase A Failed (non-EEXIST) -> Attempt temp cleanup and throw Phase A error
     if (phaseACopyError) {
       let cleanupFailed = false;
       let cleanupErrMessage = "";
@@ -370,27 +374,14 @@ export const storageService = {
       phaseBCleanupError = rmErr instanceof Error ? rmErr : new Error(String(rmErr));
     }
 
-    if (phaseBCleanupError) {
-      const msg = createdByThisUpload
-        ? `Canonical file created successfully at ${canonicalAbs}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`
-        : `Canonical file already exists at ${canonicalAbs}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`;
-
-      throw new StorageError(msg, {
-        canonicalCreated: true,
-        createdByThisUpload,
-        partialUploadOrphaned: true,
-        tempPath,
-        canonicalAbsolutePath: canonicalAbs,
-        cleanupCause: phaseBCleanupError.message,
-      });
-    }
-
     return {
       canonicalAbsolutePath: canonicalAbs,
       storageRelativePath: toStorageRelativePath(canonicalAbs),
       isDuplicate: !createdByThisUpload,
       isNewCanonicalFile: createdByThisUpload,
       createdByThisUpload,
+      tempCleanupFailed: phaseBCleanupError !== null,
+      tempCleanupErrorMessage: phaseBCleanupError ? phaseBCleanupError.message : undefined,
     };
   },
 

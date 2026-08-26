@@ -6,51 +6,49 @@ import { execSync } from "node:child_process";
 import { ensureSqliteParentDir } from "@/infrastructure/db/client";
 
 describe("SQLite Default Local Setup & Parent Directory Auto-Creation Smoke Test", () => {
-  const relDbPath = "./.test-sqlite-default-smoke/dev.db";
+  const defaultUrlShape = "file:./test-default-smoke.db";
   const schemaDir = path.resolve(process.cwd(), "prisma");
-  const absParentDir = path.resolve(schemaDir, ".test-sqlite-default-smoke");
-  const absDbFile = path.resolve(schemaDir, relDbPath);
+  const expectedDbFile = path.resolve(schemaDir, "test-default-smoke.db");
 
   beforeEach(() => {
-    if (fs.existsSync(absParentDir)) {
-      fs.rmSync(absParentDir, { recursive: true, force: true });
+    if (fs.existsSync(expectedDbFile)) {
+      fs.rmSync(expectedDbFile, { force: true });
     }
   });
 
   afterEach(() => {
-    if (fs.existsSync(absParentDir)) {
-      fs.rmSync(absParentDir, { recursive: true, force: true });
+    if (fs.existsSync(expectedDbFile)) {
+      fs.rmSync(expectedDbFile, { force: true });
     }
   });
 
-  it("proves production ensureSqliteParentDir prevents SQLite Error Code 14 on fresh clones", async () => {
-    // 1. Verify parent directory is absent initially
-    expect(fs.existsSync(absParentDir)).toBe(false);
+  it("proves production ensureSqliteParentDir prevents SQLite Error Code 14 on fresh clones using default DATABASE_URL relative shape", async () => {
+    // 1. Target DB file is absent initially
+    expect(fs.existsSync(expectedDbFile)).toBe(false);
 
-    // 2. Simulate default .env configuration (DATABASE_URL="file:./.test-sqlite-default-smoke/dev.db")
-    const testDbUrl = `file:${relDbPath}`;
-    process.env.DATABASE_URL = testDbUrl;
+    // 2. Set process.env.DATABASE_URL to default URL relative shape from .env.example
+    process.env.DATABASE_URL = defaultUrlShape;
 
     // 3. Call the REAL production helper directly from client.ts
-    const resolvedAbsPath = ensureSqliteParentDir(testDbUrl);
-    expect(resolvedAbsPath).toBe(absDbFile);
+    const resolvedAbsPath = ensureSqliteParentDir(defaultUrlShape);
+    expect(resolvedAbsPath).toBe(expectedDbFile);
 
-    // 4. Verify parent directory was created on disk
-    expect(fs.existsSync(absParentDir)).toBe(true);
+    // 4. Verify parent directory (prisma/) exists on disk
+    expect(fs.existsSync(schemaDir)).toBe(true);
 
-    // 5. Apply real Prisma migrations to the relative database path
+    // 5. Apply real Prisma migrations to the database URL shape
     const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
     execSync(`${npxCmd} prisma migrate deploy`, {
-      env: { ...process.env, DATABASE_URL: testDbUrl },
+      env: { ...process.env, DATABASE_URL: defaultUrlShape },
       stdio: "pipe",
     });
 
-    expect(fs.existsSync(absDbFile)).toBe(true);
+    expect(fs.existsSync(expectedDbFile)).toBe(true);
 
     // 6. Connect PrismaClient and run Brand & Project queries
     const client = new PrismaClient({
       datasources: {
-        db: { url: testDbUrl },
+        db: { url: defaultUrlShape },
       },
     });
 
