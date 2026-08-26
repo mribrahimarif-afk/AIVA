@@ -1,1 +1,1 @@
-export type { VideoProvider } from "./video-provider.interface";
+export type { VideoProcessingProvider } from "./video-processing-provider.interface";

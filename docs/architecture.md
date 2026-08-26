@@ -55,21 +55,36 @@ SQLite's Prisma connector doesn't support native enum columns. All
 enumerated fields (`Project.status`, `Project.aspectRatio`, `Scene.status`,
 `Asset.type`, `Asset.source`) are stored as `String` in the schema; the
 authoritative set of allowed values lives in `src/domain/*/*.types.ts` as
-`as const` tuples, with matching Zod schemas in `*.schema.ts`. Repositories
-cast the stored string back to the narrow TypeScript union when mapping a
-Prisma row to a domain object.
+`as const` tuples, with matching Zod schemas in `*.schema.ts`. Because
+SQLite itself enforces no constraint on these columns, `src/repositories/mappers.ts`
+re-validates the stored string against the matching Zod schema when
+mapping a Prisma row to a domain object, rather than blindly casting it —
+a row with a corrupted or hand-edited status/type value throws a
+`DataIntegrityError` instead of silently becoming a "valid" domain object
+with a status the rest of the app doesn't know how to handle.
 
 ## Provider abstractions (interfaces only)
 
 `src/providers/{ai,voice,stock,video}` each export a single interface
-(`AiProvider`, `VoiceProvider`, `StockProvider`, `VideoProvider`) describing
-the contract a future integration (Gemini, Azure Speech, Pexels/Pixabay, a
-video-generation API) will implement. TASK-001 intentionally does not:
+(`AiProvider`, `VoiceProvider`, `StockProvider`, `VideoProcessingProvider`)
+describing the contract a future integration (Gemini, Azure Speech,
+Pexels/Pixabay) or local processing step will implement. TASK-001
+intentionally does not:
 
 - implement any of these interfaces,
 - call any external API,
 - read provider API keys for anything other than reporting configuration
   status in Settings (`src/providers/provider-status.ts`).
+
+**AIVA does not have — and will never have — an AI video-generation
+provider.** Clips from external tools such as Google Flow/Veo are
+produced outside AIVA and manually uploaded through AIVA Intake; they are
+never fetched by calling a generation API from within this app.
+`VideoProcessingProvider` exists only for future *local* processing of
+video files AIVA already has on disk (e.g. an FFmpeg trim/concat/format
+step during rendering) — it has no "generate a clip from a prompt"
+method, unlike the other three provider interfaces which do model calling
+an external generation/lookup API.
 
 This keeps the seam where those integrations will land explicit and
 typed, without pulling any of that scope into this task.
@@ -84,29 +99,53 @@ typed, without pulling any of that scope into this task.
 - `StorageError` (500) — a filesystem operation failed
 - `ProviderError` (502) — reserved for future provider adapters
 - `RenderError` (500) — reserved for the future rendering pipeline
+- `DataIntegrityError` (500) — a value read back from the database failed
+  its own domain schema (see the mapper note above)
 
 `src/infrastructure/http/error-response.ts` is the single place that turns
 a thrown error into an HTTP response for API routes, so error handling
-isn't reimplemented per route.
+isn't reimplemented per route. **Server-fault errors (httpStatus ≥ 500)
+never expose their `message` or `details` to the client** — a
+`StorageError`'s `details` can contain a filesystem path, a
+`ProviderError`'s could someday contain an upstream response body — the
+client gets a generic message while the full error (still passed through
+the logger's redaction) is logged for operators. Only client-fault errors
+(400/404) keep their real message/details, since the UI depends on them
+(e.g. `ValidationError`'s `details.fieldErrors`).
 
 ## Health checks
 
 `GET /api/health` (`src/app/api/health/route.ts`) aggregates three
-independent checks — database (`SELECT 1`), storage (global skeleton
-exists/writable), and FFmpeg (binary detected on `PATH` or at
-`AIVA_FFMPEG_PATH`) — into one report. FFmpeg being unavailable degrades
-the overall status to `DEGRADED` rather than failing the check or crashing
-the app; only a database or storage failure produces `DOWN` (HTTP 503).
+independent checks — database (`SELECT 1`), storage, and FFmpeg (binary
+detected on `PATH` or at `AIVA_FFMPEG_PATH`) — into one report. The
+storage check does more than confirm the directory tree exists (a
+`mkdir(recursive: true)` on an already-present tree succeeds even if it's
+read-only): it also writes and deletes a small probe file
+(`storageService.verifyWritable()`) so a storage root that exists but
+isn't writable is correctly reported as `DOWN`, not `OK`. FFmpeg being
+unavailable degrades the overall status to `DEGRADED` rather than failing
+the check or crashing the app; only a database or storage failure
+produces `DOWN` (HTTP 503).
 
 ## Logging
 
 `src/infrastructure/logging/logger.ts` emits one JSON object per line with
 a fixed set of structured fields (`timestamp`, `level`, `event`,
 `projectId`, `sceneId`, `provider`, `durationMs`, `message`, `error`, plus
-arbitrary extra context). Any object key matching a secret-shaped pattern
-(`apiKey`, `token`, `password`, `authorization`, etc.) is redacted
-recursively before serialization — this is enforced centrally in the
-logger, not left to call sites to remember.
+arbitrary extra context). Redaction happens at two levels, both enforced
+centrally in the logger rather than left to call sites to remember:
+
+- any object **key** matching a secret-shaped pattern (`apiKey`, `token`,
+  `password`, `authorization`, etc.) is redacted recursively, regardless
+  of nesting depth;
+- every string **value** — including the top-level `message`, and a
+  serialized `Error`'s `message`/`stack` — is separately scanned for
+  secret-shaped *content* (`key: value`/`key=value` pairs, `Bearer <token>`,
+  and common provider token prefixes) and redacted in place. This matters
+  because a future provider adapter's thrown error is unlikely to put a
+  credential behind a conveniently-named key — it's far more likely to
+  end up as plain text inside an HTTP client's error message or stack
+  trace, which key-based redaction alone would miss.
 
 ## TASK-001 scope and non-goals
 
