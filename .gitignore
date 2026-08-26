@@ -1,0 +1,44 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# storage (runtime data, never committed) - root-anchored so this does not
+# also match src/storage/ (source code) or tests/unit/storage/ (tests)
+/storage/
+/.test-storage/
+prisma-test/
+
+# db
+*.db
+*.db-journal
+prisma/dev.db
+prisma/dev.db-journal
+prisma/test.db
+prisma/test.db-journal
+
+# logs
+*.log
+npm-debug.log*
+
+# os
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# testing
+coverage/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
