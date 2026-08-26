@@ -106,18 +106,32 @@ export const storageService = {
       for (const subdir of PROJECT_WORKSPACE_SUBDIRS) {
         await ensureDir(path.join(workspacePath, subdir));
       }
-    } catch (error) {
+    } catch (initError) {
       if (!workspaceAlreadyExisted) {
-        await fs.rm(workspacePath, { recursive: true, force: true }).catch((cleanupError: unknown) => {
+        try {
+          await fs.rm(workspacePath, { recursive: true, force: true });
+        } catch (cleanupError) {
           logger.error({
             event: "storage.partial_workspace_cleanup_failed",
             projectId,
+            workspacePath,
             error: cleanupError,
-            message: "Failed to remove partially-created project workspace after init failure",
+            message:
+              "Failed to remove partially-created project workspace after init failure; partial workspace is orphaned and requires manual cleanup",
           });
-        });
+          throw new StorageError(
+            "Failed to create project workspace, and cleanup of the partial workspace directory failed; partial workspace is orphaned",
+            {
+              projectId,
+              workspacePath,
+              partialWorkspaceOrphaned: true,
+              initCause: initError instanceof Error ? initError.message : String(initError),
+              cleanupCause: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            }
+          );
+        }
       }
-      throw error;
+      throw initError;
     }
 
     logger.info({

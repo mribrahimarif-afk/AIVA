@@ -105,6 +105,46 @@ describe("storageService.initializeProjectWorkspace", () => {
     expect(stat.isDirectory()).toBe(true);
     expect(await fs.readFile(marker, "utf-8")).toBe("still here");
   });
+
+  it("surfaces cleanup failure with partialWorkspaceOrphaned details if fs.rm fails after init failure", async () => {
+    const projectId = newProjectId();
+    const workspacePath = getProjectWorkspacePath(projectId);
+    const originalMkdir = fs.mkdir.bind(fs);
+
+    let calls = 0;
+    const mkdirSpy = vi.spyOn(fs, "mkdir").mockImplementation(async (...args) => {
+      calls += 1;
+      // Succeed for workspace root (call 1), fail on subdirectory creation (call 2)
+      if (calls === 2) {
+        throw Object.assign(new Error("simulated init failure"), { code: "EIO" });
+      }
+      return originalMkdir(...(args as Parameters<typeof fs.mkdir>));
+    });
+
+    const rmSpy = vi
+      .spyOn(fs, "rm")
+      .mockRejectedValue(Object.assign(new Error("simulated cleanup failure EBUSY"), { code: "EBUSY" }));
+
+    try {
+      let thrownErr: StorageError | undefined;
+      try {
+        await storageService.initializeProjectWorkspace(projectId);
+      } catch (err) {
+        if (err instanceof StorageError) thrownErr = err;
+      }
+
+      expect(thrownErr).toBeInstanceOf(StorageError);
+      expect(thrownErr?.details).toMatchObject({
+        projectId,
+        workspacePath,
+        partialWorkspaceOrphaned: true,
+      });
+      expect(thrownErr?.message).toContain("cleanup of the partial workspace directory failed");
+    } finally {
+      mkdirSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+  });
 });
 
 describe("storageService.initializeGlobalStorage", () => {
