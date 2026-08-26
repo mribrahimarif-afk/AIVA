@@ -145,6 +145,80 @@ describe("storageService.initializeProjectWorkspace", () => {
       rmSpy.mockRestore();
     }
   });
+
+  it("fails safely and never calls fs.rm if fs.stat throws EACCES during workspace existence check", async () => {
+    const projectId = newProjectId();
+    const workspacePath = await storageService.initializeProjectWorkspace(projectId);
+    const marker = path.join(workspacePath, "source", "protected-file.txt");
+    await fs.writeFile(marker, "critical user data");
+
+    const statSpy = vi
+      .spyOn(fs, "stat")
+      .mockRejectedValue(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }));
+    const rmSpy = vi.spyOn(fs, "rm");
+
+    try {
+      await expect(storageService.initializeProjectWorkspace(projectId)).rejects.toThrow(StorageError);
+      expect(rmSpy).not.toHaveBeenCalled();
+    } finally {
+      statSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+
+    // Verify existing workspace contents were NOT deleted
+    const content = await fs.readFile(marker, "utf-8");
+    expect(content).toBe("critical user data");
+  });
+
+  it("fails safely and never calls fs.rm if fs.stat throws EIO during workspace existence check", async () => {
+    const projectId = newProjectId();
+    const workspacePath = await storageService.initializeProjectWorkspace(projectId);
+    const marker = path.join(workspacePath, "source", "important-file.txt");
+    await fs.writeFile(marker, "do not erase");
+
+    const statSpy = vi
+      .spyOn(fs, "stat")
+      .mockRejectedValue(Object.assign(new Error("EIO: i/o error"), { code: "EIO" }));
+    const rmSpy = vi.spyOn(fs, "rm");
+
+    try {
+      await expect(storageService.initializeProjectWorkspace(projectId)).rejects.toThrow(StorageError);
+      expect(rmSpy).not.toHaveBeenCalled();
+    } finally {
+      statSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+
+    // Verify existing workspace contents were NOT deleted
+    const content = await fs.readFile(marker, "utf-8");
+    expect(content).toBe("do not erase");
+  });
+
+  it("treats ENOENT as genuinely missing and proceeds with normal workspace creation", async () => {
+    const projectId = newProjectId();
+    const workspacePath = getProjectWorkspacePath(projectId);
+
+    // Confirm path genuinely does not exist (ENOENT)
+    expect(await storageService.projectWorkspaceExists(projectId)).toBe(false);
+
+    // Normal initialization works as expected
+    const createdPath = await storageService.initializeProjectWorkspace(projectId);
+    expect(createdPath).toBe(workspacePath);
+    expect(await storageService.projectWorkspaceExists(projectId)).toBe(true);
+  });
+
+  it("surfaces StorageError in projectWorkspaceExists when stat fails with non-ENOENT error", async () => {
+    const projectId = newProjectId();
+    const statSpy = vi
+      .spyOn(fs, "stat")
+      .mockRejectedValue(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }));
+
+    try {
+      await expect(storageService.projectWorkspaceExists(projectId)).rejects.toThrow(StorageError);
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
 });
 
 describe("storageService.initializeGlobalStorage", () => {

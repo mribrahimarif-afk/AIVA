@@ -25,12 +25,26 @@ async function ensureDir(dirPath: string): Promise<void> {
   }
 }
 
+/**
+ * Safely checks if a path exists. Returns false ONLY when stat fails with
+ * ENOENT (path genuinely does not exist). Any other filesystem error (e.g.
+ * EACCES, EPERM, EIO, EBUSY) indicates an inaccessible or transiently failing
+ * path that MAY exist, so it throws a StorageError rather than assuming the
+ * path is missing. This prevents destructive cleanup from accidentally
+ * deleting pre-existing workspaces when permission or I/O errors occur.
+ */
 async function pathExists(target: string): Promise<boolean> {
   try {
     await fs.stat(target);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw new StorageError(`Failed to determine existence of path: ${target}`, {
+      path: target,
+      cause: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 
@@ -143,13 +157,26 @@ export const storageService = {
     return workspacePath;
   },
 
-  /** Returns whether a project's workspace directory exists on disk. */
+  /**
+   * Returns whether a project's workspace directory exists on disk.
+   * Returns false ONLY when the directory genuinely does not exist (ENOENT).
+   * Throws a StorageError if access is denied or an I/O error occurs,
+   * avoiding false negatives for existing but inaccessible paths.
+   */
   async projectWorkspaceExists(projectId: string): Promise<boolean> {
+    const workspacePath = getProjectWorkspacePath(projectId);
     try {
-      const stat = await fs.stat(getProjectWorkspacePath(projectId));
+      const stat = await fs.stat(workspacePath);
       return stat.isDirectory();
-    } catch {
-      return false;
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+        return false;
+      }
+      throw new StorageError(`Failed to determine workspace existence for project: ${projectId}`, {
+        projectId,
+        path: workspacePath,
+        cause: error instanceof Error ? error.message : String(error),
+      });
     }
   },
 
