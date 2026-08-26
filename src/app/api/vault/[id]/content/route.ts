@@ -30,8 +30,10 @@ export async function GET(
     const rangeHeader = request.headers.get("range");
 
     if (rangeHeader) {
-      const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
-      if (!match) {
+      const rawRange = rangeHeader.trim();
+      const match = /^bytes=(?:(\d+)-(\d*)|-(\d+))$/i.exec(rawRange);
+
+      if (!match || rawRange === "bytes=-") {
         return new NextResponse(null, {
           status: 416,
           headers: {
@@ -40,13 +42,38 @@ export async function GET(
         });
       }
 
-      const startRaw = match[1];
-      const endRaw = match[2];
+      let start: number;
+      let end: number;
 
-      const startParsed = startRaw ? parseInt(startRaw, 10) : 0;
-      const endParsed = endRaw ? parseInt(endRaw, 10) : sizeBytes - 1;
+      if (match[3] !== undefined) {
+        // Suffix byte range specifier (bytes=-N -> last N bytes)
+        const suffixLength = parseInt(match[3], 10);
+        if (isNaN(suffixLength) || suffixLength <= 0) {
+          return new NextResponse(null, {
+            status: 416,
+            headers: {
+              "Content-Range": `bytes */${sizeBytes}`,
+            },
+          });
+        }
+        start = Math.max(0, sizeBytes - suffixLength);
+        end = sizeBytes - 1;
+      } else {
+        // Standard range specifier (bytes=start-end or bytes=start-)
+        const startRaw = match[1];
+        const endRaw = match[2];
 
-      if (isNaN(startParsed) || startParsed < 0 || startParsed >= sizeBytes || isNaN(endParsed) || endParsed < startParsed) {
+        start = startRaw ? parseInt(startRaw, 10) : 0;
+        end = endRaw ? parseInt(endRaw, 10) : sizeBytes - 1;
+      }
+
+      if (
+        isNaN(start) ||
+        isNaN(end) ||
+        start < 0 ||
+        start >= sizeBytes ||
+        end < start
+      ) {
         return new NextResponse(null, {
           status: 416,
           headers: {
@@ -55,8 +82,10 @@ export async function GET(
         });
       }
 
-      const end = endParsed >= sizeBytes ? sizeBytes - 1 : endParsed;
-      const start = startParsed;
+      // Clamp end byte index to file boundary
+      if (end >= sizeBytes) {
+        end = sizeBytes - 1;
+      }
 
       const chunkSize = end - start + 1;
       const nodeStream = storageService.createBlobReadStream(blob.storagePath, { start, end });

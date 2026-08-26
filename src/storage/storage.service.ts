@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import createReadStream from "node:fs";
 import path from "node:path";
 import crypto, { randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
+import { Readable, once } from "node:stream";
 import { StorageError, ValidationError } from "@/domain/errors";
 import { getEnv } from "@/infrastructure/config/env";
 import { logger } from "@/infrastructure/logging/logger";
@@ -186,7 +186,7 @@ export const storageService = {
 
   /**
    * Streams input readable stream into storage/temp/ with incremental SHA-256 and max upload bytes enforcement.
-   * Never swallows temporary file cleanup errors if streaming or byte limits fail.
+   * Respects stream backpressure ('drain' event) and handles stream aborts safely.
    */
   async stageStream(
     stream: ReadableStream<Uint8Array> | Readable,
@@ -224,7 +224,12 @@ export const storageService = {
         }
 
         hash.update(buf);
-        writeStream.write(buf);
+
+        // Bounded-memory backpressure handling
+        const canWriteMore = writeStream.write(buf);
+        if (!canWriteMore) {
+          await once(writeStream, "drain");
+        }
 
         if (leadingBytesCount < 8192) {
           leadingChunks.push(buf);
@@ -239,6 +244,7 @@ export const storageService = {
         });
       });
     } catch (primaryError) {
+      writeStream.destroy();
       let cleanupFailed = false;
       let cleanupErrorMessage = "";
       try {
@@ -281,8 +287,10 @@ export const storageService = {
   },
 
   /**
-   * Finalizes a staged upload file to its permanent canonical location using EXCLUSIVE NO-CLOBBER creation (COPYFILE_EXCL).
-   * driven strictly by filesystem exclusive result, eliminating TOCTOU race conditions.
+   * Explicit 2-Phase Finalize State Machine:
+   * Phase A: Exclusive canonical file creation (COPYFILE_EXCL).
+   * Phase B: Temp file cleanup.
+   * Never loses creator state or reports creation failure if Phase A succeeded but Phase B temp cleanup failed.
    */
   async finalizeBlob(
     tempPath: string,
@@ -293,44 +301,38 @@ export const storageService = {
     storageRelativePath: string;
     isDuplicate: boolean;
     isNewCanonicalFile: boolean;
+    createdByThisUpload: boolean;
   }> {
     const canonicalAbs = getCanonicalBlobPath(checksum, canonicalExtension);
     const targetDir = path.dirname(canonicalAbs);
     await ensureDir(targetDir);
 
+    let createdByThisUpload = false;
+    let isEexist = false;
+    let phaseACopyError: Error | null = null;
+
+    // Phase A: Exclusive Canonical Creation
     try {
       await fs.copyFile(tempPath, canonicalAbs, fs.constants.COPYFILE_EXCL);
-      // Exclusive creation succeeded — THIS request is the canonical creator
-      await this.removeTempFile(tempPath);
-      return {
-        canonicalAbsolutePath: canonicalAbs,
-        storageRelativePath: toStorageRelativePath(canonicalAbs),
-        isDuplicate: false,
-        isNewCanonicalFile: true,
-      };
+      createdByThisUpload = true;
     } catch (copyError) {
-      const isEexist =
+      isEexist =
         typeof copyError === "object" &&
         copyError !== null &&
         "code" in copyError &&
-        copyError.code === "EEXIST";
+        (copyError as { code: unknown }).code === "EEXIST";
 
-      if (isEexist) {
-        // File already exists — another concurrent request or prior upload created it
-        await this.removeTempFile(tempPath);
-        return {
-          canonicalAbsolutePath: canonicalAbs,
-          storageRelativePath: toStorageRelativePath(canonicalAbs),
-          isDuplicate: true,
-          isNewCanonicalFile: false,
-        };
+      if (!isEexist) {
+        phaseACopyError = copyError instanceof Error ? copyError : new Error(String(copyError));
       }
+    }
 
-      // Copying failed due to non-EEXIST error (e.g. EACCES, ENOSPC)
+    // Phase A Failed (non-EEXIST) -> Attempt temp cleanup and surface Phase A error
+    if (phaseACopyError) {
       let cleanupFailed = false;
       let cleanupErrMessage = "";
       try {
-        await this.removeTempFile(tempPath);
+        await fs.rm(tempPath, { force: true });
       } catch (rmErr) {
         cleanupFailed = true;
         cleanupErrMessage = rmErr instanceof Error ? rmErr.message : String(rmErr);
@@ -338,23 +340,58 @@ export const storageService = {
 
       if (cleanupFailed) {
         throw new StorageError(
-          `Failed to finalize canonical blob file at ${canonicalAbs}, and temp cleanup also failed; temp file is orphaned at ${tempPath}`,
+          `Failed to create canonical blob file at ${canonicalAbs}, and temp cleanup also failed; temp file is orphaned at ${tempPath}`,
           {
+            canonicalCreated: false,
+            createdByThisUpload: false,
             tempPath,
             canonicalAbsolutePath: canonicalAbs,
             partialUploadOrphaned: true,
-            copyCause: copyError instanceof Error ? copyError.message : String(copyError),
+            copyCause: phaseACopyError.message,
             cleanupCause: cleanupErrMessage,
           }
         );
       }
 
-      throw new StorageError(`Failed to finalize canonical blob file at ${canonicalAbs}`, {
+      throw new StorageError(`Failed to create canonical blob file at ${canonicalAbs}`, {
+        canonicalCreated: false,
+        createdByThisUpload: false,
         tempPath,
         canonicalAbsolutePath: canonicalAbs,
-        cause: copyError instanceof Error ? copyError.message : String(copyError),
+        cause: phaseACopyError.message,
       });
     }
+
+    // Phase B: Temp File Cleanup
+    let phaseBCleanupError: Error | null = null;
+    try {
+      await fs.rm(tempPath, { force: true });
+    } catch (rmErr) {
+      phaseBCleanupError = rmErr instanceof Error ? rmErr : new Error(String(rmErr));
+    }
+
+    if (phaseBCleanupError) {
+      const msg = createdByThisUpload
+        ? `Canonical file created successfully at ${canonicalAbs}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`
+        : `Canonical file already exists at ${canonicalAbs}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`;
+
+      throw new StorageError(msg, {
+        canonicalCreated: true,
+        createdByThisUpload,
+        partialUploadOrphaned: true,
+        tempPath,
+        canonicalAbsolutePath: canonicalAbs,
+        cleanupCause: phaseBCleanupError.message,
+      });
+    }
+
+    return {
+      canonicalAbsolutePath: canonicalAbs,
+      storageRelativePath: toStorageRelativePath(canonicalAbs),
+      isDuplicate: !createdByThisUpload,
+      isNewCanonicalFile: createdByThisUpload,
+      createdByThisUpload,
+    };
   },
 
   /**

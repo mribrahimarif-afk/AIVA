@@ -4,25 +4,28 @@ import { PrismaClient } from "@prisma/client";
 
 /**
  * Ensures the parent directory for a SQLite database file exists before Prisma Client initializes.
+ * Resolves relative file: URLs relative to the Prisma schema directory (prisma/).
  */
-function ensureSqliteParentDir(): void {
-  const dbUrl = process.env.DATABASE_URL;
-  if (!dbUrl || !dbUrl.startsWith("file:")) return;
+export function ensureSqliteParentDir(customDbUrl?: string): string {
+  const dbUrl = customDbUrl || process.env.DATABASE_URL;
+  if (!dbUrl || !dbUrl.startsWith("file:")) return "";
 
   try {
     const relativeOrAbsPath = dbUrl.replace(/^file:/, "").split("?")[0] || "";
-    if (!relativeOrAbsPath) return;
+    if (!relativeOrAbsPath) return "";
 
+    const schemaDir = path.resolve(process.cwd(), "prisma");
     const absPath = path.isAbsolute(relativeOrAbsPath)
       ? relativeOrAbsPath
-      : path.resolve(process.cwd(), relativeOrAbsPath);
+      : path.resolve(schemaDir, relativeOrAbsPath);
 
     const parentDir = path.dirname(absPath);
     if (!fs.existsSync(parentDir)) {
       fs.mkdirSync(parentDir, { recursive: true });
     }
+    return absPath;
   } catch {
-    // Fail soft if process.env.DATABASE_URL isn't standard file: protocol
+    return "";
   }
 }
 

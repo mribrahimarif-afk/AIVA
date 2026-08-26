@@ -9,6 +9,42 @@ import type { ProductRepository } from "@/repositories/product.repository";
 import { storageService, type StagedUploadResult } from "@/storage/storage.service";
 import { logger } from "@/infrastructure/logging/logger";
 
+/**
+ * Process-Local Per-Checksum Async Mutex.
+ *
+ * Provides in-process serialization per SHA-256 binary content checksum.
+ * Ensures concurrent upload requests targeting identical binary content execute sequentially through
+ * the complete critical lifecycle: DB check -> canonical file creation -> ContentBlob DB record creation -> Asset linking -> compensation.
+ *
+ * NOTE: This implementation is process-local for single-machine local deployment (TASK-002 scope).
+ * Multi-process or distributed node deployments require a distributed lock manager (e.g. Redis Redlock),
+ * which is outside the scope of TASK-002.
+ */
+export class ChecksumMutex {
+  private locks = new Map<string, Promise<void>>();
+
+  async runExclusive<T>(checksum: string, task: () => Promise<T>): Promise<T> {
+    while (this.locks.has(checksum)) {
+      await this.locks.get(checksum);
+    }
+
+    let resolveNext!: () => void;
+    const lockPromise = new Promise<void>((res) => {
+      resolveNext = res;
+    });
+    this.locks.set(checksum, lockPromise);
+
+    try {
+      return await task();
+    } finally {
+      this.locks.delete(checksum);
+      resolveNext();
+    }
+  }
+}
+
+export const checksumMutex = new ChecksumMutex();
+
 export interface UploadVaultAssetInput {
   fileBuffer: Buffer;
   originalFilename: string;
@@ -164,130 +200,133 @@ export function createVaultService(
     const defaultAssetType = rules.defaultAssetType;
     const canonicalExtension = `.${validationResult.detectedExt}`;
 
-    // Fast-path: Check if ContentBlob already exists in DB
-    const preExistingBlob = await blobRepo.findByChecksum(checksum);
-    if (preExistingBlob) {
-      await storageService.removeTempFile(tempPath);
+    // Critical Lifecycle under Per-Checksum Process-Local Mutex
+    return checksumMutex.runExclusive(checksum, async () => {
+      // 1. Check if ContentBlob already exists in DB
+      const preExistingBlob = await blobRepo.findByChecksum(checksum);
+      if (preExistingBlob) {
+        await storageService.removeTempFile(tempPath);
 
-      const asset = await assetRepo.create({
-        title: title || originalFilename,
-        originalFilename,
-        type: defaultAssetType,
-        vaultRole: role,
-        source: "LOCAL_UPLOAD",
-        localPath: preExistingBlob.storagePath,
-        mimeType: validationResult.detectedMime || mimeType || preExistingBlob.mimeType,
-        sizeBytes,
-        checksum,
-        metadata: {
-          reused: true,
-          deduplicated: true,
-        },
-        brandId: resolvedBrandId,
-        productId: resolvedProductId,
-        blobId: preExistingBlob.id,
-      });
-
-      logger.info({
-        event: "vault.duplicate_reused",
-        assetId: asset.id,
-        blobId: preExistingBlob.id,
-        checksum,
-        sizeBytes,
-        role,
-        message: `Reused existing content blob for '${originalFilename}'`,
-      });
-
-      return { asset, isDuplicate: true };
-    }
-
-    let isNewCanonicalFileCreated = false;
-    let createdCanonicalAbsPath: string | null = null;
-
-    try {
-      const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
-      isNewCanonicalFileCreated = finalized.isNewCanonicalFile;
-      createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
-
-      let blob = await blobRepo.findByChecksum(checksum);
-      if (!blob) {
-        blob = await blobRepo.create({
-          checksum,
-          storagePath: finalized.storageRelativePath,
+        const asset = await assetRepo.create({
+          title: title || originalFilename,
+          originalFilename,
+          type: defaultAssetType,
+          vaultRole: role,
+          source: "LOCAL_UPLOAD",
+          localPath: preExistingBlob.storagePath,
+          mimeType: validationResult.detectedMime || mimeType || preExistingBlob.mimeType,
           sizeBytes,
-          mimeType: validationResult.detectedMime || mimeType || "application/octet-stream",
+          checksum,
+          metadata: {
+            reused: true,
+            deduplicated: true,
+          },
+          brandId: resolvedBrandId,
+          productId: resolvedProductId,
+          blobId: preExistingBlob.id,
         });
+
+        logger.info({
+          event: "vault.duplicate_reused",
+          assetId: asset.id,
+          blobId: preExistingBlob.id,
+          checksum,
+          sizeBytes,
+          role,
+          message: `Reused existing content blob for '${originalFilename}'`,
+        });
+
+        return { asset, isDuplicate: true };
       }
 
-      const isDuplicate = !isNewCanonicalFileCreated;
+      let createdByThisUpload = false;
+      let createdCanonicalAbsPath: string | null = null;
 
-      const asset = await assetRepo.create({
-        title: title || originalFilename,
-        originalFilename,
-        type: defaultAssetType,
-        vaultRole: role,
-        source: "LOCAL_UPLOAD",
-        localPath: blob.storagePath,
-        mimeType: validationResult.detectedMime || mimeType || blob.mimeType,
-        sizeBytes,
-        checksum,
-        metadata: {
-          reused: isDuplicate,
-          deduplicated: isDuplicate,
-        },
-        brandId: resolvedBrandId,
-        productId: resolvedProductId,
-        blobId: blob.id,
-      });
+      try {
+        const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
+        createdByThisUpload = finalized.createdByThisUpload;
+        createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
 
-      logger.info({
-        event: isNewCanonicalFileCreated ? "vault.asset_stored" : "vault.duplicate_reused",
-        assetId: asset.id,
-        blobId: blob.id,
-        checksum,
-        sizeBytes,
-        role,
-        message: isNewCanonicalFileCreated
-          ? `Stored new canonical asset '${originalFilename}'`
-          : `Reused existing content blob for '${originalFilename}'`,
-      });
+        let blob = await blobRepo.findByChecksum(checksum);
+        if (!blob) {
+          blob = await blobRepo.create({
+            checksum,
+            storagePath: finalized.storageRelativePath,
+            sizeBytes,
+            mimeType: validationResult.detectedMime || mimeType || "application/octet-stream",
+          });
+        }
 
-      return { asset, isDuplicate };
-    } catch (err) {
-      // Safe compensation if THIS request created a new canonical file and no ContentBlob references it
-      if (isNewCanonicalFileCreated && createdCanonicalAbsPath) {
-        const existingBlob = await blobRepo.findByChecksum(checksum);
-        if (!existingBlob) {
-          try {
-            await storageService.compensateCanonicalBlob(createdCanonicalAbsPath);
-          } catch (compErr) {
-            logger.error({
-              event: "vault.compensation_failed",
-              canonicalAbsolutePath: createdCanonicalAbsPath,
-              error: compErr,
-              message: "Failed to compensate canonical file after asset creation failure",
-            });
-            throw new StorageError(
-              `Asset processing failed and canonical file compensation also failed; file is orphaned at '${createdCanonicalAbsPath}'`,
-              {
+        const isDuplicate = !createdByThisUpload;
+
+        const asset = await assetRepo.create({
+          title: title || originalFilename,
+          originalFilename,
+          type: defaultAssetType,
+          vaultRole: role,
+          source: "LOCAL_UPLOAD",
+          localPath: blob.storagePath,
+          mimeType: validationResult.detectedMime || mimeType || blob.mimeType,
+          sizeBytes,
+          checksum,
+          metadata: {
+            reused: isDuplicate,
+            deduplicated: isDuplicate,
+          },
+          brandId: resolvedBrandId,
+          productId: resolvedProductId,
+          blobId: blob.id,
+        });
+
+        logger.info({
+          event: createdByThisUpload ? "vault.asset_stored" : "vault.duplicate_reused",
+          assetId: asset.id,
+          blobId: blob.id,
+          checksum,
+          sizeBytes,
+          role,
+          message: createdByThisUpload
+            ? `Stored new canonical asset '${originalFilename}'`
+            : `Reused existing content blob for '${originalFilename}'`,
+        });
+
+        return { asset, isDuplicate };
+      } catch (err) {
+        // Safe Reference-Safe Compensation under Mutex
+        if (createdByThisUpload && createdCanonicalAbsPath) {
+          const existingBlob = await blobRepo.findByChecksum(checksum);
+          if (!existingBlob) {
+            try {
+              await storageService.compensateCanonicalBlob(createdCanonicalAbsPath);
+            } catch (compErr) {
+              logger.error({
+                event: "vault.compensation_failed",
                 canonicalAbsolutePath: createdCanonicalAbsPath,
-                canonicalOrphaned: true,
-                primaryCause: err instanceof Error ? err.message : String(err),
-                compensationCause: compErr instanceof Error ? compErr.message : String(compErr),
-              }
-            );
+                error: compErr,
+                message: "Failed to compensate canonical file after asset creation failure",
+              });
+              throw new StorageError(
+                `Asset processing failed and canonical file compensation also failed; file is orphaned at '${createdCanonicalAbsPath}'`,
+                {
+                  canonicalAbsolutePath: createdCanonicalAbsPath,
+                  canonicalOrphaned: true,
+                  primaryCause: err instanceof Error ? err.message : String(err),
+                  compensationCause: compErr instanceof Error ? compErr.message : String(compErr),
+                }
+              );
+            }
           }
         }
-      }
 
-      logger.error({
-        event: "vault.upload_failed",
-        originalFilename,
-        error: err,
-        message: "Failed during vault asset processing",
-      });
-      throw err;
-    }
+        logger.error({
+          event: "vault.upload_failed",
+          originalFilename,
+          error: err,
+          message: "Failed during vault asset processing",
+        });
+        throw err;
+      }
+    });
   }
 
   return {

@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { PrismaClient } from "@prisma/client";
 import { execSync } from "node:child_process";
+import { ensureSqliteParentDir } from "@/infrastructure/db/client";
 
 describe("SQLite Default Local Setup & Parent Directory Auto-Creation Smoke Test", () => {
   const relDbPath = "./.test-sqlite-default-smoke/dev.db";
@@ -22,33 +23,25 @@ describe("SQLite Default Local Setup & Parent Directory Auto-Creation Smoke Test
     }
   });
 
-  it("proves parent directory auto-creation prevents SQLite Error Code 14 on fresh clones", async () => {
+  it("proves production ensureSqliteParentDir prevents SQLite Error Code 14 on fresh clones", async () => {
     // 1. Verify parent directory is absent initially
     expect(fs.existsSync(absParentDir)).toBe(false);
 
     // 2. Simulate default .env configuration (DATABASE_URL="file:./.test-sqlite-default-smoke/dev.db")
-    process.env.DATABASE_URL = `file:${relDbPath}`;
+    const testDbUrl = `file:${relDbPath}`;
+    process.env.DATABASE_URL = testDbUrl;
 
-    // 3. Import / invoke parent directory auto-creation logic
-    const dbUrl = process.env.DATABASE_URL;
-    const relativeOrAbsPath = dbUrl.replace(/^file:/, "").split("?")[0] || "";
-    const targetParentDir = path.dirname(
-      path.isAbsolute(relativeOrAbsPath)
-        ? relativeOrAbsPath
-        : path.resolve(schemaDir, relativeOrAbsPath)
-    );
-
-    if (!fs.existsSync(targetParentDir)) {
-      fs.mkdirSync(targetParentDir, { recursive: true });
-    }
+    // 3. Call the REAL production helper directly from client.ts
+    const resolvedAbsPath = ensureSqliteParentDir(testDbUrl);
+    expect(resolvedAbsPath).toBe(absDbFile);
 
     // 4. Verify parent directory was created on disk
     expect(fs.existsSync(absParentDir)).toBe(true);
 
-    // 5. Apply Prisma migrations to the relative database path
+    // 5. Apply real Prisma migrations to the relative database path
     const npxCmd = process.platform === "win32" ? "npx.cmd" : "npx";
     execSync(`${npxCmd} prisma migrate deploy`, {
-      env: { ...process.env, DATABASE_URL: `file:${relDbPath}` },
+      env: { ...process.env, DATABASE_URL: testDbUrl },
       stdio: "pipe",
     });
 
@@ -57,7 +50,7 @@ describe("SQLite Default Local Setup & Parent Directory Auto-Creation Smoke Test
     // 6. Connect PrismaClient and run Brand & Project queries
     const client = new PrismaClient({
       datasources: {
-        db: { url: `file:${relDbPath}` },
+        db: { url: testDbUrl },
       },
     });
 
