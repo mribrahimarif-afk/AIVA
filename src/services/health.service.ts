@@ -29,6 +29,10 @@ async function checkStorage(): Promise<HealthReport["storage"]> {
   const root = getStorageRoot();
   try {
     await storageService.initializeGlobalStorage();
+    // initializeGlobalStorage only proves the directory tree exists;
+    // mkdir(recursive: true) on an already-present tree succeeds even if
+    // it's read-only. Probe with an actual write to catch that case.
+    await storageService.verifyWritable();
     return { state: "OK", root };
   } catch (error) {
     logger.error({ event: "health.storage_check_failed", error });

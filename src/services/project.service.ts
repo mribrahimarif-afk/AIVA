@@ -1,7 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import type { Project } from "@/domain/project";
 import { createProjectSchema, projectIdSchema, type CreateProjectInput } from "@/domain/project";
-import { NotFoundError, ValidationError } from "@/domain/errors";
+import { NotFoundError, StorageError, ValidationError } from "@/domain/errors";
 import type { ProjectRepository } from "@/repositories/project.repository";
 import { storageService } from "@/storage/storage.service";
 import { logger } from "@/infrastructure/logging/logger";
@@ -12,10 +12,26 @@ export interface ProjectService {
   listProjects(): Promise<Project[]>;
 }
 
+/** The one storage operation project creation depends on. Narrowed to an
+ * interface (rather than depending on the concrete `storageService`
+ * export) so tests can inject a fake that fails on demand, without
+ * touching the real filesystem. */
+export interface ProjectWorkspaceInitializer {
+  initializeProjectWorkspace(projectId: string): Promise<string>;
+}
+
+/** The one database operation used for rollback. Narrowed to an
+ * interface for the same reason as `storage` below — tests can inject a
+ * `db` whose `project.delete` fails on demand to exercise the
+ * rollback-failure path without needing a real broken database. */
+export interface ProjectRollbackDb {
+  project: { delete: PrismaClient["project"]["delete"] };
+}
+
 interface ProjectServiceDeps {
   projectRepository: ProjectRepository;
-  /** Used only to roll back a project record if workspace init fails. */
-  db: PrismaClient;
+  db: ProjectRollbackDb;
+  storage?: ProjectWorkspaceInitializer;
 }
 
 /**
@@ -23,8 +39,18 @@ interface ProjectServiceDeps {
  * record, then initializes the on-disk workspace. If workspace creation
  * fails, the database record is rolled back so we never end up with a
  * project that has no storage to write into.
+ *
+ * If the rollback delete *itself* fails, that failure is never silently
+ * swallowed: it's logged distinctly from the original workspace failure,
+ * and a StorageError with `details.orphaned: true` is thrown so callers
+ * (and anyone reading logs/health) can tell the difference between "the
+ * project was cleanly rejected" and "manual cleanup is required."
  */
-export function createProjectService({ projectRepository, db }: ProjectServiceDeps): ProjectService {
+export function createProjectService({
+  projectRepository,
+  db,
+  storage = storageService,
+}: ProjectServiceDeps): ProjectService {
   return {
     async createProject(rawInput: unknown): Promise<Project> {
       const parsed = createProjectSchema.safeParse(rawInput);
@@ -40,16 +66,32 @@ export function createProjectService({ projectRepository, db }: ProjectServiceDe
       });
 
       try {
-        await storageService.initializeProjectWorkspace(project.id);
-      } catch (error) {
+        await storage.initializeProjectWorkspace(project.id);
+      } catch (workspaceError) {
         logger.error({
           event: "project.workspace_init_failed",
           projectId: project.id,
-          error,
+          error: workspaceError,
           message: "Rolling back project record after workspace init failure",
         });
-        await db.project.delete({ where: { id: project.id } }).catch(() => undefined);
-        throw error;
+
+        try {
+          await db.project.delete({ where: { id: project.id } });
+        } catch (rollbackError) {
+          logger.error({
+            event: "project.rollback_failed",
+            projectId: project.id,
+            error: rollbackError,
+            message:
+              "Failed to roll back project record after workspace init failure; project row is orphaned and requires manual cleanup",
+          });
+          throw new StorageError(
+            "Failed to create the project workspace, and the database record could not be rolled back automatically",
+            { projectId: project.id, orphaned: true }
+          );
+        }
+
+        throw workspaceError;
       }
 
       logger.info({ event: "project.created", projectId: project.id, message: project.name });

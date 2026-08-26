@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { storageService } from "@/storage/storage.service";
 import { getProjectWorkspacePath, PROJECT_WORKSPACE_SUBDIRS } from "@/storage/paths";
+import { StorageError } from "@/domain/errors";
 
 const createdProjectIds: string[] = [];
 
@@ -46,6 +47,64 @@ describe("storageService.initializeProjectWorkspace", () => {
     await storageService.initializeProjectWorkspace(projectId);
     expect(await storageService.projectWorkspaceExists(projectId)).toBe(true);
   });
+
+  it("removes a newly-created workspace entirely if a subdirectory fails partway through", async () => {
+    const projectId = newProjectId();
+    const workspacePath = getProjectWorkspacePath(projectId);
+    const originalMkdir = fs.mkdir.bind(fs);
+
+    let calls = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (...args) => {
+      calls += 1;
+      // Let the workspace root (call 1) and first subdirectory (call 2)
+      // succeed for real, then fail on the third call to simulate a
+      // mid-way disk failure.
+      if (calls === 3) {
+        throw Object.assign(new Error("simulated ENOSPC"), { code: "ENOSPC" });
+      }
+      return originalMkdir(...(args as Parameters<typeof fs.mkdir>));
+    });
+
+    try {
+      await expect(storageService.initializeProjectWorkspace(projectId)).rejects.toThrow(StorageError);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Nothing should be left behind: this call created the workspace
+    // root, so failure must clean the whole tree up, not just stop
+    // partway through it.
+    await expect(fs.stat(workspacePath)).rejects.toThrow();
+  });
+
+  it("does not delete an already-existing workspace if a later re-init call fails", async () => {
+    const projectId = newProjectId();
+    const workspacePath = await storageService.initializeProjectWorkspace(projectId);
+
+    const marker = path.join(workspacePath, "source", "keep-me.txt");
+    await fs.writeFile(marker, "still here");
+
+    const originalMkdir = fs.mkdir.bind(fs);
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (...args) => {
+      const target = String(args[0]);
+      if (path.basename(target) === "temp") {
+        throw Object.assign(new Error("simulated EACCES"), { code: "EACCES" });
+      }
+      return originalMkdir(...(args as Parameters<typeof fs.mkdir>));
+    });
+
+    try {
+      await expect(storageService.initializeProjectWorkspace(projectId)).rejects.toThrow(StorageError);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The workspace pre-existed this call, so a failure partway through
+    // re-initializing it must NOT delete the tree or the file already in it.
+    const stat = await fs.stat(workspacePath);
+    expect(stat.isDirectory()).toBe(true);
+    expect(await fs.readFile(marker, "utf-8")).toBe("still here");
+  });
 });
 
 describe("storageService.initializeGlobalStorage", () => {
@@ -53,6 +112,28 @@ describe("storageService.initializeGlobalStorage", () => {
     await storageService.initializeGlobalStorage();
     await expect(storageService.initializeGlobalStorage()).resolves.toBeUndefined();
   });
+});
+
+describe("storageService.verifyWritable", () => {
+  it("succeeds when the storage root is actually writable", async () => {
+    await expect(storageService.verifyWritable()).resolves.toBeUndefined();
+  });
+
+  it("throws a StorageError when the write probe fails", async () => {
+    const spy = vi
+      .spyOn(fs, "writeFile")
+      .mockRejectedValueOnce(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }));
+
+    try {
+      await expect(storageService.verifyWritable()).rejects.toThrow(StorageError);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 afterAll(async () => {

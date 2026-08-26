@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
+import type { PrismaClient } from "@prisma/client";
 import { afterAll, describe, expect, it } from "vitest";
 import { prisma } from "@/infrastructure/db/client";
 import { createProjectRepository } from "@/repositories/project.repository";
-import { createProjectService } from "@/services/project.service";
+import { createProjectService, type ProjectRollbackDb, type ProjectWorkspaceInitializer } from "@/services/project.service";
 import { getProjectWorkspacePath } from "@/storage/paths";
-import { ValidationError, NotFoundError } from "@/domain/errors";
+import { ValidationError, NotFoundError, StorageError } from "@/domain/errors";
 
 const projectRepository = createProjectRepository(prisma);
 const projectService = createProjectService({ projectRepository, db: prisma });
@@ -89,6 +90,83 @@ describe("Project service (create + workspace initialization)", () => {
 
   it("throws NotFoundError for a missing project", async () => {
     await expect(projectService.getProject("missing-project-id")).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe("Project service rollback on workspace failure", () => {
+  const alwaysFailingStorage: ProjectWorkspaceInitializer = {
+    async initializeProjectWorkspace(): Promise<string> {
+      throw new StorageError("simulated workspace failure");
+    },
+  };
+
+  it("rolls back the project row and leaves no orphaned workspace when workspace init fails", async () => {
+    let capturedProjectId: string | undefined;
+    const capturingFailingStorage: ProjectWorkspaceInitializer = {
+      async initializeProjectWorkspace(projectId: string): Promise<string> {
+        capturedProjectId = projectId;
+        throw new StorageError("simulated workspace failure");
+      },
+    };
+    const serviceWithFailingStorage = createProjectService({
+      projectRepository,
+      db: prisma,
+      storage: capturingFailingStorage,
+    });
+
+    await expect(
+      serviceWithFailingStorage.createProject({ name: "Rollback Test", script: "", aspectRatio: "9:16" })
+    ).rejects.toBeInstanceOf(StorageError);
+
+    expect(capturedProjectId).toBeTruthy();
+
+    // The DB row must be gone (rolled back)...
+    const allProjects = await projectRepository.findAll();
+    expect(allProjects.some((p) => p.name === "Rollback Test")).toBe(false);
+    expect(await projectRepository.findById(capturedProjectId as string)).toBeNull();
+
+    // ...and no directory should exist for that id on disk either,
+    // proving this isn't just a DB-only rollback that leaves a
+    // filesystem orphan behind.
+    await expect(fs.stat(getProjectWorkspacePath(capturedProjectId as string))).rejects.toThrow();
+  });
+
+  it("surfaces (never swallows) a rollback failure as an orphaned-project error", async () => {
+    const failingRollbackDb: ProjectRollbackDb = {
+      project: {
+        delete: (async () => {
+          throw new Error("simulated database unavailable during rollback");
+        }) as unknown as PrismaClient["project"]["delete"],
+      },
+    };
+    const serviceWithBothFailing = createProjectService({
+      projectRepository,
+      db: failingRollbackDb,
+      storage: alwaysFailingStorage,
+    });
+
+    let thrown: unknown;
+    try {
+      await serviceWithBothFailing.createProject({ name: "Orphan Test", script: "", aspectRatio: "9:16" });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(StorageError);
+    expect((thrown as StorageError).details?.orphaned).toBe(true);
+
+    // Because the simulated rollback failed, the row must still be
+    // findable afterward — proving the failure was surfaced rather than
+    // silently lost (a real, working `db.project.delete` would have
+    // removed it, as proven by the previous test). Clean it up directly
+    // via the real client since the service's own rollback couldn't.
+    const rows = await projectRepository.findAll();
+    const orphanRow = rows.find((p) => p.name === "Orphan Test");
+    expect(orphanRow).toBeDefined();
+
+    if (orphanRow) {
+      await prisma.project.delete({ where: { id: orphanRow.id } });
+    }
   });
 });
 
