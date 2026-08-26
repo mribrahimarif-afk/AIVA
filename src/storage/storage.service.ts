@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import createWriteStream from "node:fs";
+import createReadStream from "node:fs";
 import path from "node:path";
 import crypto, { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
@@ -186,32 +186,25 @@ export const storageService = {
 
   /**
    * Streams input readable stream into storage/temp/ with incremental SHA-256 and max upload bytes enforcement.
+   * Never swallows temporary file cleanup errors if streaming or byte limits fail.
    */
   async stageStream(
     stream: ReadableStream<Uint8Array> | Readable,
-    originalFilename: string,
-    contentLength?: number
+    originalFilename: string
   ): Promise<StagedUploadResult> {
     const env = getEnv();
-    if (contentLength && contentLength > env.AIVA_MAX_UPLOAD_BYTES) {
-      throw new ValidationError(
-        `Upload size (${contentLength} bytes) exceeds maximum allowed limit (${env.AIVA_MAX_UPLOAD_BYTES} bytes)`
-      );
-    }
-
     await ensureDir(getTempRoot());
     const sanitizedFilename = path.basename(originalFilename).replace(/[^a-zA-Z0-9_.-]/g, "_");
     const extension = path.extname(sanitizedFilename) || ".bin";
     const tempPath = path.join(getTempRoot(), `upload-${randomUUID()}-${sanitizedFilename}`);
 
     const hash = crypto.createHash("sha256");
-    const writeStream = createWriteStream.createWriteStream(tempPath);
+    const writeStream = createReadStream.createWriteStream(tempPath);
     const leadingChunks: Buffer[] = [];
     let leadingBytesCount = 0;
     let totalBytes = 0;
 
     try {
-      // Convert ReadableStream if Web stream passed
       let nodeStream: Readable;
       if ("getReader" in stream) {
         nodeStream = Readable.fromWeb(stream as unknown as Parameters<typeof Readable.fromWeb>[0]);
@@ -225,7 +218,6 @@ export const storageService = {
 
         if (totalBytes > env.AIVA_MAX_UPLOAD_BYTES) {
           writeStream.destroy();
-          await fs.rm(tempPath, { force: true });
           throw new ValidationError(
             `Upload exceeded maximum allowed size limit of ${env.AIVA_MAX_UPLOAD_BYTES} bytes`
           );
@@ -246,12 +238,32 @@ export const storageService = {
           else resolve();
         });
       });
-    } catch (error) {
-      await fs.rm(tempPath, { force: true }).catch(() => {});
-      if (error instanceof ValidationError) throw error;
+    } catch (primaryError) {
+      let cleanupFailed = false;
+      let cleanupErrorMessage = "";
+      try {
+        await fs.rm(tempPath, { force: true });
+      } catch (rmErr) {
+        cleanupFailed = true;
+        cleanupErrorMessage = rmErr instanceof Error ? rmErr.message : String(rmErr);
+      }
+
+      if (cleanupFailed) {
+        throw new StorageError(
+          `Upload streaming failed, and temporary file cleanup also failed; temporary file is orphaned at '${tempPath}'`,
+          {
+            tempPath,
+            partialUploadOrphaned: true,
+            primaryCause: primaryError instanceof Error ? primaryError.message : String(primaryError),
+            cleanupCause: cleanupErrorMessage,
+          }
+        );
+      }
+
+      if (primaryError instanceof ValidationError) throw primaryError;
       throw new StorageError(`Failed to stream upload payload to temporary storage: ${sanitizedFilename}`, {
         tempPath,
-        cause: error instanceof Error ? error.message : String(error),
+        cause: primaryError instanceof Error ? primaryError.message : String(primaryError),
       });
     }
 
@@ -269,8 +281,8 @@ export const storageService = {
   },
 
   /**
-   * Finalizes a staged upload file to its permanent canonical location:
-   * storage/assets/blobs/{checksum-prefix}/{checksum}.{detectedExt}
+   * Finalizes a staged upload file to its permanent canonical location using EXCLUSIVE NO-CLOBBER creation (COPYFILE_EXCL).
+   * driven strictly by filesystem exclusive result, eliminating TOCTOU race conditions.
    */
   async finalizeBlob(
     tempPath: string,
@@ -286,41 +298,63 @@ export const storageService = {
     const targetDir = path.dirname(canonicalAbs);
     await ensureDir(targetDir);
 
-    const alreadyExists = await pathExists(canonicalAbs);
-
-    if (alreadyExists) {
+    try {
+      await fs.copyFile(tempPath, canonicalAbs, fs.constants.COPYFILE_EXCL);
+      // Exclusive creation succeeded — THIS request is the canonical creator
       await this.removeTempFile(tempPath);
       return {
         canonicalAbsolutePath: canonicalAbs,
         storageRelativePath: toStorageRelativePath(canonicalAbs),
-        isDuplicate: true,
-        isNewCanonicalFile: false,
+        isDuplicate: false,
+        isNewCanonicalFile: true,
       };
-    }
+    } catch (copyError) {
+      const isEexist =
+        typeof copyError === "object" &&
+        copyError !== null &&
+        "code" in copyError &&
+        copyError.code === "EEXIST";
 
-    try {
-      await fs.rename(tempPath, canonicalAbs);
-    } catch {
-      // Fallback for cross-device filesystem moves
-      try {
-        await fs.copyFile(tempPath, canonicalAbs);
+      if (isEexist) {
+        // File already exists — another concurrent request or prior upload created it
         await this.removeTempFile(tempPath);
-      } catch (copyError) {
-        await this.removeTempFile(tempPath);
-        throw new StorageError(`Failed to finalize canonical blob file at ${canonicalAbs}`, {
-          tempPath,
+        return {
           canonicalAbsolutePath: canonicalAbs,
-          cause: copyError instanceof Error ? copyError.message : String(copyError),
-        });
+          storageRelativePath: toStorageRelativePath(canonicalAbs),
+          isDuplicate: true,
+          isNewCanonicalFile: false,
+        };
       }
-    }
 
-    return {
-      canonicalAbsolutePath: canonicalAbs,
-      storageRelativePath: toStorageRelativePath(canonicalAbs),
-      isDuplicate: false,
-      isNewCanonicalFile: true,
-    };
+      // Copying failed due to non-EEXIST error (e.g. EACCES, ENOSPC)
+      let cleanupFailed = false;
+      let cleanupErrMessage = "";
+      try {
+        await this.removeTempFile(tempPath);
+      } catch (rmErr) {
+        cleanupFailed = true;
+        cleanupErrMessage = rmErr instanceof Error ? rmErr.message : String(rmErr);
+      }
+
+      if (cleanupFailed) {
+        throw new StorageError(
+          `Failed to finalize canonical blob file at ${canonicalAbs}, and temp cleanup also failed; temp file is orphaned at ${tempPath}`,
+          {
+            tempPath,
+            canonicalAbsolutePath: canonicalAbs,
+            partialUploadOrphaned: true,
+            copyCause: copyError instanceof Error ? copyError.message : String(copyError),
+            cleanupCause: cleanupErrMessage,
+          }
+        );
+      }
+
+      throw new StorageError(`Failed to finalize canonical blob file at ${canonicalAbs}`, {
+        tempPath,
+        canonicalAbsolutePath: canonicalAbs,
+        cause: copyError instanceof Error ? copyError.message : String(copyError),
+      });
+    }
   },
 
   /**
@@ -366,6 +400,33 @@ export const storageService = {
         cause: error instanceof Error ? error.message : String(error),
       });
     }
+  },
+
+  /**
+   * Resolves storage-relative path and retrieves stat information.
+   */
+  async getBlobStat(storageRelativePath: string): Promise<{ sizeBytes: number; isFile: boolean }> {
+    const absPath = resolveStoragePath(storageRelativePath);
+    try {
+      const stat = await fs.stat(absPath);
+      return { sizeBytes: stat.size, isFile: stat.isFile() };
+    } catch (error) {
+      throw new StorageError(`Failed to stat storage file: ${storageRelativePath}`, {
+        storageRelativePath,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+
+  /**
+   * Creates a read stream for a storage-relative file.
+   */
+  createBlobReadStream(
+    storageRelativePath: string,
+    options?: { start?: number; end?: number }
+  ): Readable {
+    const absPath = resolveStoragePath(storageRelativePath);
+    return createReadStream.createReadStream(absPath, options);
   },
 
   pathExists,

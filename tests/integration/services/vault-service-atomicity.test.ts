@@ -14,20 +14,21 @@ describe("Vault Upload Atomicity, Compensation & Canonical Extensions", () => {
     ]);
   });
 
-  it("stores canonical payload under detected extension even if user provided another permitted extension", async () => {
+  it("stores canonical payload under detected canonical extension (.jpg) when user uploads an allowed extension alias (.jpeg)", async () => {
     const brand = await services.brand.createBrand({ name: "Canonical Brand", slug: "canonical-brand" });
-    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]);
+    const jpegHeader = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
 
-    // Upload with .jpeg extension but PNG binary payload
+    // Upload with .jpeg extension (an allowed extension alias for JPEG)
     const res = await services.vault.uploadAsset({
-      fileBuffer: pngHeader,
-      originalFilename: "logo_misnamed.png",
-      mimeType: "image/png",
+      fileBuffer: jpegHeader,
+      originalFilename: "logo_photo.jpeg",
+      mimeType: "image/jpeg",
       vaultRole: "BRAND_LOGO",
       brandId: brand.id,
     });
 
-    expect(res.asset.localPath).toContain(".png");
+    // Verified detected canonical format extension is .jpg
+    expect(res.asset.localPath).toContain(".jpg");
     const exists = await storageService.pathExists(storageService.resolveStoragePath(res.asset.localPath!));
     expect(exists).toBe(true);
   });

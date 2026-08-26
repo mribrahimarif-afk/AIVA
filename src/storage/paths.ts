@@ -1,5 +1,6 @@
 import path from "node:path";
 import { getEnv } from "@/infrastructure/config/env";
+import { StorageError } from "@/domain/errors";
 
 export const PROJECT_WORKSPACE_SUBDIRS = [
   "source",
@@ -21,7 +22,7 @@ const CHECKSUM_PATTERN = /^[a-fA-F0-9]{64}$/;
 
 function assertSafeSegment(segment: string, label: string): void {
   if (!segment || !PROJECT_ID_PATTERN.test(segment)) {
-    throw new Error(`Invalid ${label}: "${segment}"`);
+    throw new StorageError(`Invalid ${label}: "${segment}"`);
   }
 }
 
@@ -68,19 +69,19 @@ export function getTempRoot(): string {
 
 export function getCanonicalBlobPath(checksum: string, extension: string): string {
   if (!checksum || !CHECKSUM_PATTERN.test(checksum)) {
-    throw new Error(`Invalid SHA-256 checksum format: "${checksum}"`);
+    throw new StorageError(`Invalid SHA-256 checksum format: "${checksum}"`);
   }
   const prefix = checksum.substring(0, 2).toLowerCase();
   const cleanExt = extension.startsWith(".") ? extension.toLowerCase() : `.${extension.toLowerCase()}`;
   if (cleanExt.includes("/") || cleanExt.includes("\\") || cleanExt.includes("..")) {
-    throw new Error(`Invalid file extension: "${extension}"`);
+    throw new StorageError(`Invalid file extension: "${extension}"`);
   }
   return path.join(getBlobsRoot(), prefix, `${checksum.toLowerCase()}${cleanExt}`);
 }
 
 /**
  * Converts an absolute filesystem path under storage root to a normalized, POSIX-style storage-relative path.
- * Throws an Error if the path escapes or lies outside the storage root.
+ * Throws a StorageError if the path escapes or lies outside the storage root.
  */
 export function toStorageRelativePath(absolutePath: string): string {
   const root = getStorageRoot();
@@ -88,14 +89,20 @@ export function toStorageRelativePath(absolutePath: string): string {
 
   const rel = path.relative(root, normalizedAbs);
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error(`Path '${absolutePath}' escapes storage root '${root}'`);
+    throw new StorageError(`Path '${absolutePath}' escapes storage root '${root}'`, {
+      absolutePath,
+      storageRoot: root,
+    });
   }
 
   // Ensure sibling directory with matching prefix fails (e.g. /storage-evil vs /storage)
   if (normalizedAbs.length > root.length) {
     const nextChar = normalizedAbs.charAt(root.length);
     if (nextChar !== path.sep) {
-      throw new Error(`Path '${absolutePath}' lies in sibling directory outside storage root '${root}'`);
+      throw new StorageError(
+        `Path '${absolutePath}' lies in sibling directory outside storage root '${root}'`,
+        { absolutePath, storageRoot: root }
+      );
     }
   }
 
@@ -104,22 +111,18 @@ export function toStorageRelativePath(absolutePath: string): string {
 
 /**
  * Safely resolves a storage-relative path to an absolute path inside AIVA_STORAGE_ROOT.
- * Rejects absolute path inputs, path traversal (`../`), and outside-root escapes.
+ * Rejects ALL absolute path inputs, path traversal (`../`), and outside-root escapes.
  */
 export function resolveStoragePath(relativePath: string): string {
   if (!relativePath || typeof relativePath !== "string") {
-    throw new Error("Relative storage path must be a non-empty string");
+    throw new StorageError("Relative storage path must be a non-empty string");
   }
 
   if (path.isAbsolute(relativePath)) {
-    // If it's already an absolute path, verify strict containment inside storage root
-    const root = getStorageRoot();
-    const normalizedAbs = path.normalize(relativePath);
-    const rel = path.relative(root, normalizedAbs);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      throw new Error(`Absolute path '${relativePath}' escapes storage root '${root}'`);
-    }
-    return normalizedAbs;
+    throw new StorageError(
+      `Invalid storage relative path: absolute paths are not permitted in Vault storage resolution ('${relativePath}')`,
+      { relativePath }
+    );
   }
 
   const root = getStorageRoot();
@@ -127,7 +130,10 @@ export function resolveStoragePath(relativePath: string): string {
   const rel = path.relative(root, resolved);
 
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error(`Relative storage path '${relativePath}' escapes storage root '${root}'`);
+    throw new StorageError(
+      `Relative storage path '${relativePath}' escapes storage root '${root}'`,
+      { relativePath, storageRoot: root }
+    );
   }
 
   return resolved;

@@ -11,8 +11,7 @@ export type DetectedFileType =
   | "ttf"
   | "otf"
   | "woff"
-  | "woff2"
-  | "svg";
+  | "woff2";
 
 export interface FileSignatureResult {
   detectedExt: DetectedFileType | null;
@@ -21,15 +20,99 @@ export interface FileSignatureResult {
   reason?: string;
 }
 
+export interface FormatSpec {
+  canonicalExt: DetectedFileType;
+  allowedExtensions: string[];
+  allowedMimes: string[];
+}
+
+export const FORMAT_SPECS: Record<DetectedFileType, FormatSpec> = {
+  png: {
+    canonicalExt: "png",
+    allowedExtensions: [".png"],
+    allowedMimes: ["image/png"],
+  },
+  jpg: {
+    canonicalExt: "jpg",
+    allowedExtensions: [".jpg", ".jpeg"],
+    allowedMimes: ["image/jpeg", "image/jpg", "image/pjpeg"],
+  },
+  webp: {
+    canonicalExt: "webp",
+    allowedExtensions: [".webp"],
+    allowedMimes: ["image/webp"],
+  },
+  mp4: {
+    canonicalExt: "mp4",
+    allowedExtensions: [".mp4", ".m4v"],
+    allowedMimes: ["video/mp4"],
+  },
+  mov: {
+    canonicalExt: "mov",
+    allowedExtensions: [".mov", ".qt"],
+    allowedMimes: ["video/quicktime"],
+  },
+  webm: {
+    canonicalExt: "webm",
+    allowedExtensions: [".webm"],
+    allowedMimes: ["video/webm"],
+  },
+  mp3: {
+    canonicalExt: "mp3",
+    allowedExtensions: [".mp3"],
+    allowedMimes: ["audio/mpeg", "audio/mp3"],
+  },
+  wav: {
+    canonicalExt: "wav",
+    allowedExtensions: [".wav"],
+    allowedMimes: ["audio/wav", "audio/x-wav", "audio/wave"],
+  },
+  m4a: {
+    canonicalExt: "m4a",
+    allowedExtensions: [".m4a"],
+    allowedMimes: ["audio/mp4", "audio/x-m4a", "audio/m4a"],
+  },
+  ttf: {
+    canonicalExt: "ttf",
+    allowedExtensions: [".ttf"],
+    allowedMimes: ["font/ttf", "font/sfnt", "application/x-font-ttf"],
+  },
+  otf: {
+    canonicalExt: "otf",
+    allowedExtensions: [".otf"],
+    allowedMimes: ["font/otf", "font/sfnt", "application/x-font-opentype"],
+  },
+  woff: {
+    canonicalExt: "woff",
+    allowedExtensions: [".woff"],
+    allowedMimes: ["font/woff", "application/font-woff"],
+  },
+  woff2: {
+    canonicalExt: "woff2",
+    allowedExtensions: [".woff2"],
+    allowedMimes: ["font/woff2", "application/font-woff2"],
+  },
+};
+
 /**
- * Inspects leading file bytes (up to 8192 bytes) to detect canonical media format and validate against malicious scripts/executables.
+ * Normalizes a declared MIME type string safely (strips parameters like ; charset=utf-8, trims, lowercases).
+ */
+export function normalizeMimeType(mime: string): string {
+  if (!mime) return "application/octet-stream";
+  const clean = mime.split(";")[0]?.trim().toLowerCase();
+  return clean || "application/octet-stream";
+}
+
+/**
+ * Inspects leading file bytes (up to 8192 bytes) to detect canonical media format.
+ * SVG support is intentionally deferred until a full-document sanitizer exists.
  */
 export function detectFileSignature(buffer: Buffer): FileSignatureResult {
   if (!buffer || buffer.length === 0) {
     return { detectedExt: null, detectedMime: null, isValidSignature: false, reason: "Empty file payload" };
   }
 
-  // Explicitly check for Executable / Binary Header signatures
+  // Check for Executable / Binary Header signatures
   // 1. Windows PE Executable (MZ): 4D 5A
   if (buffer.length >= 2 && buffer[0] === 0x4d && buffer[1] === 0x5a) {
     return { detectedExt: null, detectedMime: null, isValidSignature: false, reason: "Executable PE binary signature detected" };
@@ -140,32 +223,6 @@ export function detectFileSignature(buffer: Buffer): FileSignatureResult {
     if (fontAscii === "wOF2") {
       return { detectedExt: "woff2", detectedMime: "font/woff2", isValidSignature: true };
     }
-  }
-
-  // SVG: Text payload containing <svg> root element
-  const textSample = buffer.toString("utf-8", 0, Math.min(buffer.length, 4096)).trim();
-  if (textSample.toLowerCase().includes("<svg")) {
-    const lower = textSample.toLowerCase();
-
-    // Check for malicious script / active content execution vectors in SVG
-    const hasForbiddenSvgPatterns =
-      lower.includes("<script") ||
-      lower.includes("javascript:") ||
-      lower.includes("<foreignobject") ||
-      lower.includes("<embed") ||
-      lower.includes("<object") ||
-      /\bon\w+\s*=/i.test(textSample);
-
-    if (hasForbiddenSvgPatterns) {
-      return {
-        detectedExt: null,
-        detectedMime: null,
-        isValidSignature: false,
-        reason: "SVG contains active script elements or event handlers",
-      };
-    }
-
-    return { detectedExt: "svg", detectedMime: "image/svg+xml", isValidSignature: true };
   }
 
   return {

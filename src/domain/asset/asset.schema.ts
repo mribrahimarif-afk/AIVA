@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { ASSET_SOURCES, ASSET_TYPES, VAULT_ROLES, type VaultRole } from "./asset.types";
-import { detectFileSignature } from "./file-signature";
+import { detectFileSignature, FORMAT_SPECS, normalizeMimeType } from "./file-signature";
 
 export const assetTypeSchema = z.enum(ASSET_TYPES);
 export const vaultRoleSchema = z.enum(VAULT_ROLES);
 export const assetSourceSchema = z.enum(ASSET_SOURCES);
 
 export const FORBIDDEN_EXTENSIONS = new Set([
-  ".exe", ".sh", ".bat", ".cmd", ".js", ".mjs", ".cjs", ".ts", ".php", ".py", ".html", ".htm", ".ps1", ".vbs", ".jar", ".dll", ".so", ".bin", ".scr", ".pif"
+  ".exe", ".sh", ".bat", ".cmd", ".js", ".mjs", ".cjs", ".ts", ".php", ".py", ".html", ".htm", ".ps1", ".vbs", ".jar", ".dll", ".so", ".bin", ".scr", ".pif", ".svg"
 ]);
 
 export interface RoleFileRules {
@@ -18,8 +18,8 @@ export interface RoleFileRules {
 
 export const ROLE_FILE_RULES: Record<VaultRole, RoleFileRules> = {
   BRAND_LOGO: {
-    allowedExtensions: [".png", ".jpg", ".jpeg", ".webp", ".svg"],
-    allowedMimeTypes: ["image/png", "image/jpeg", "image/webp", "image/svg+xml"],
+    allowedExtensions: [".png", ".jpg", ".jpeg", ".webp"],
+    allowedMimeTypes: ["image/png", "image/jpeg", "image/jpg", "image/webp"],
     defaultAssetType: "PRODUCT",
   },
   PRODUCT_VIDEO: {
@@ -28,20 +28,20 @@ export const ROLE_FILE_RULES: Record<VaultRole, RoleFileRules> = {
     defaultAssetType: "PRODUCT",
   },
   MUSIC: {
-    allowedExtensions: [".mp3", ".wav", ".m4a", ".aac"],
-    allowedMimeTypes: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac", "audio/x-m4a"],
+    allowedExtensions: [".mp3", ".wav", ".m4a"],
+    allowedMimeTypes: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4", "audio/x-m4a", "audio/m4a"],
     defaultAssetType: "AUDIO",
   },
   SFX: {
-    allowedExtensions: [".mp3", ".wav", ".m4a", ".aac"],
-    allowedMimeTypes: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac", "audio/x-m4a"],
+    allowedExtensions: [".mp3", ".wav", ".m4a"],
+    allowedMimeTypes: ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/mp4", "audio/x-m4a", "audio/m4a"],
     defaultAssetType: "AUDIO",
   },
   OUTRO: {
     allowedExtensions: [".mp4", ".mov", ".webm", ".png", ".jpg", ".jpeg", ".webp"],
     allowedMimeTypes: [
       "video/mp4", "video/quicktime", "video/webm",
-      "image/png", "image/jpeg", "image/webp"
+      "image/png", "image/jpeg", "image/jpg", "image/webp"
     ],
     defaultAssetType: "SOURCE",
   },
@@ -64,10 +64,10 @@ export const ROLE_FILE_RULES: Record<VaultRole, RoleFileRules> = {
 
 export function validateRoleFile(
   filename: string,
-  mimeType: string,
+  declaredMime: string,
   role: VaultRole,
   fileBuffer?: Buffer
-): { detectedExt: string | null; detectedMime: string | null } {
+): { detectedExt: string; detectedMime: string } {
   const sanitizedName = filename.trim();
   const extIndex = sanitizedName.lastIndexOf(".");
   if (extIndex === -1) {
@@ -76,7 +76,7 @@ export function validateRoleFile(
 
   const ext = sanitizedName.substring(extIndex).toLowerCase();
   if (FORBIDDEN_EXTENSIONS.has(ext)) {
-    throw new Error(`Executable file extension '${ext}' is not permitted`);
+    throw new Error(`Forbidden file extension '${ext}' is not permitted`);
   }
 
   const rules = ROLE_FILE_RULES[role];
@@ -90,43 +90,68 @@ export function validateRoleFile(
     );
   }
 
-  // Strictly check MIME type (allow application/octet-stream ONLY IF file signature is verified)
-  if (mimeType && mimeType.trim()) {
-    const cleanMime = mimeType.trim().toLowerCase();
-    const isMimeAllowed = rules.allowedMimeTypes.some((allowed) =>
-      cleanMime.startsWith(allowed.toLowerCase())
+  const normalizedDeclaredMime = normalizeMimeType(declaredMime);
+
+  if (
+    normalizedDeclaredMime !== "application/octet-stream" &&
+    !rules.allowedMimeTypes.includes(normalizedDeclaredMime)
+  ) {
+    throw new Error(`MIME type '${declaredMime}' is not permitted for role '${role}'`);
+  }
+
+  if (!fileBuffer || fileBuffer.length === 0) {
+    // Metadata-only validation
+    return {
+      detectedExt: ext.replace(".", ""),
+      detectedMime: normalizedDeclaredMime,
+    };
+  }
+
+  const signature = detectFileSignature(fileBuffer);
+  if (!signature.isValidSignature || !signature.detectedExt) {
+    throw new Error(
+      `File content signature check failed for '${filename}': ${signature.reason || "Invalid content binary format"}`
     );
-
-    if (!isMimeAllowed && cleanMime !== "application/octet-stream") {
-      throw new Error(`MIME type '${mimeType}' is not permitted for role '${role}'`);
-    }
   }
 
-  let detectedExt: string | null = null;
-  let detectedMime: string | null = null;
-
-  // Perform magic bytes content signature validation if buffer provided
-  if (fileBuffer && fileBuffer.length > 0) {
-    const signature = detectFileSignature(fileBuffer);
-    if (!signature.isValidSignature || !signature.detectedExt) {
-      throw new Error(
-        `File content signature check failed for '${filename}': ${signature.reason || "Invalid content binary format"}`
-      );
-    }
-
-    const detectedExtDot = `.${signature.detectedExt}`;
-    // Verify detected extension is permitted for the vault role
-    if (!rules.allowedExtensions.includes(detectedExtDot)) {
-      throw new Error(
-        `Detected file content format '${signature.detectedExt}' is not permitted for vault role '${role}'`
-      );
-    }
-
-    detectedExt = signature.detectedExt;
-    detectedMime = signature.detectedMime;
+  const spec = FORMAT_SPECS[signature.detectedExt];
+  if (!spec) {
+    throw new Error(`Unsupported content signature format '${signature.detectedExt}'`);
   }
 
-  return { detectedExt, detectedMime };
+  // 3-Way Format Consistency Verification
+  // 1. Extension Consistency
+  if (!spec.allowedExtensions.includes(ext)) {
+    throw new Error(
+      `File format identity mismatch for '${filename}': content signature detected '${signature.detectedExt}', but extension is '${ext}'`
+    );
+  }
+
+  // 2. MIME Consistency
+  if (
+    normalizedDeclaredMime !== "application/octet-stream" &&
+    !spec.allowedMimes.includes(normalizedDeclaredMime)
+  ) {
+    throw new Error(
+      `File format identity mismatch for '${filename}': content signature detected '${signature.detectedExt}', but declared MIME is '${declaredMime}'`
+    );
+  }
+
+  // 3. Vault Role Compatibility
+  const canonicalExtDot = `.${spec.canonicalExt}`;
+  if (
+    !rules.allowedExtensions.includes(canonicalExtDot) &&
+    !spec.allowedExtensions.some((e) => rules.allowedExtensions.includes(e))
+  ) {
+    throw new Error(
+      `Detected file content format '${signature.detectedExt}' is not permitted for vault role '${role}'`
+    );
+  }
+
+  return {
+    detectedExt: spec.canonicalExt,
+    detectedMime: signature.detectedMime || spec.allowedMimes[0]!,
+  };
 }
 
 export const createAssetSchema = z.object({

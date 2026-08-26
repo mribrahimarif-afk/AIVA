@@ -154,6 +154,7 @@ export default async function AssetsPage(props: {
                   {/* Browser Media Previews */}
                   <div className="mt-3 overflow-hidden rounded border border-neutral-800 bg-neutral-950 p-2">
                     {isImage && (
+                      /* eslint-disable-next-line @next/next/no-img-element -- Raw <img> is required to render blob preview URLs from authenticated local API route /api/vault/[id]/content */
                       <img
                         src={`/api/vault/${asset.id}/content`}
                         alt={asset.title || "Asset"}

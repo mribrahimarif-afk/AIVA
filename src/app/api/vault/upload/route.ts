@@ -1,54 +1,85 @@
+import { Readable } from "node:stream";
 import { NextResponse, type NextRequest } from "next/server";
+import busboy from "busboy";
 import { services } from "@/services/container";
+import { storageService, type StagedUploadResult } from "@/storage/storage.service";
 import { toErrorResponse } from "@/infrastructure/http/error-response";
 import type { VaultRole } from "@/domain/asset";
 import { ValidationError } from "@/domain/errors";
-import { getEnv } from "@/infrastructure/config/env";
+
+interface UploadFileInfo {
+  filename: string;
+  mimeType: string;
+}
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const env = getEnv();
-    const contentLength = request.headers.get("content-length");
-    if (contentLength && parseInt(contentLength, 10) > env.AIVA_MAX_UPLOAD_BYTES) {
-      throw new ValidationError(
-        `Upload size exceeds maximum allowed limit of ${env.AIVA_MAX_UPLOAD_BYTES} bytes`
-      );
+    const contentType = request.headers.get("content-type");
+    if (!contentType || !contentType.toLowerCase().includes("multipart/form-data")) {
+      throw new ValidationError("Content-Type must be 'multipart/form-data'");
     }
 
-    const formData = await request.formData();
-    const file = formData.get("file");
+    if (!request.body) {
+      throw new ValidationError("HTTP request body stream is empty");
+    }
 
-    if (!file || !(file instanceof File)) {
-      throw new ValidationError("No valid file uploaded in field 'file'", {
-        field: "file",
+    const fields: Record<string, string> = {};
+    let uploadedFileInfo: UploadFileInfo | null = null;
+    let stagedInfoPromise: Promise<StagedUploadResult> | null = null;
+    let streamError: Error | null = null;
+
+    const bb = busboy({ headers: { "content-type": contentType } });
+
+    bb.on("field", (name, val) => {
+      fields[name] = val;
+    });
+
+    bb.on("file", (_fieldname, fileStream, info) => {
+      const { filename, mimeType } = info;
+      if (!filename) {
+        fileStream.resume(); // discard unnamed file streams
+        return;
+      }
+
+      uploadedFileInfo = { filename, mimeType: mimeType || "application/octet-stream" };
+
+      // Pipe fileStream directly to temporary file on disk as chunks arrive over HTTP
+      stagedInfoPromise = storageService.stageStream(fileStream, filename).catch((err) => {
+        streamError = err;
+        fileStream.resume(); // drain stream on error
+        throw err;
       });
+    });
+
+    const nodeStream = Readable.fromWeb(request.body as unknown as Parameters<typeof Readable.fromWeb>[0]);
+
+    await new Promise<void>((resolve, reject) => {
+      bb.on("finish", resolve);
+      bb.on("error", reject);
+      nodeStream.on("error", reject);
+      nodeStream.pipe(bb);
+    });
+
+    if (streamError) {
+      throw streamError;
     }
 
-    if (file.size > env.AIVA_MAX_UPLOAD_BYTES) {
-      throw new ValidationError(
-        `Uploaded file size (${file.size} bytes) exceeds maximum limit (${env.AIVA_MAX_UPLOAD_BYTES} bytes)`
-      );
+    if (!stagedInfoPromise || !uploadedFileInfo) {
+      throw new ValidationError("No valid file uploaded in multipart form data");
     }
 
-    const vaultRole = formData.get("vaultRole") as VaultRole;
-    if (!vaultRole) {
-      throw new ValidationError("Field 'vaultRole' is required", {
-        field: "vaultRole",
-      });
-    }
+    const activeFileInfo: UploadFileInfo = uploadedFileInfo;
+    const stagedInfo = await stagedInfoPromise;
+    const vaultRole = (fields["vaultRole"] as VaultRole) || undefined;
+    const brandId = fields["brandId"] || null;
+    const productId = fields["productId"] || null;
+    const title = fields["title"] || activeFileInfo.filename;
 
-    const brandId = (formData.get("brandId") as string) || null;
-    const productId = (formData.get("productId") as string) || null;
-    const title = (formData.get("title") as string) || file.name;
-
-    const arrayBuffer = await file.arrayBuffer();
-    const fileBuffer = Buffer.from(arrayBuffer);
-
-    const result = await services.vault.uploadAsset({
-      fileBuffer,
-      originalFilename: file.name,
-      mimeType: file.type || "application/octet-stream",
-      vaultRole,
+    const result = await services.vault.uploadStaged({
+      stagedInfo,
+      originalFilename: activeFileInfo.filename,
+      mimeType: activeFileInfo.mimeType,
+      vaultRole: vaultRole!,
       brandId,
       productId,
       title,

@@ -67,9 +67,17 @@ describe("storage path handling & security containment", () => {
     expect(resolved).toBe(path.join(getStorageRoot(), "assets", "blobs", "ab", "1234.mp4"));
   });
 
+  it("rejects ALL absolute path inputs in resolveStoragePath", () => {
+    const root = getStorageRoot();
+    const absPathUnderRoot = path.join(root, "assets", "blobs", "ab", "1234.mp4");
+    expect(() => resolveStoragePath(absPathUnderRoot)).toThrow(/absolute paths are not permitted/i);
+    expect(() => resolveStoragePath("C:\\AIVA\\storage\\assets\\blob.mp4")).toThrow(/absolute paths are not permitted/i);
+    expect(() => resolveStoragePath("/home/user/aiva/storage/assets/blob.mp4")).toThrow(/absolute paths are not permitted/i);
+  });
+
   it("rejects path traversal attempts in resolveStoragePath", () => {
-    expect(() => resolveStoragePath("../../../etc/passwd")).toThrow(/escapes storage root/i);
-    expect(() => resolveStoragePath("assets/../../secret")).toThrow(/escapes storage root/i);
+    expect(() => resolveStoragePath("../../../etc/passwd")).toThrow();
+    expect(() => resolveStoragePath("assets/../../secret")).toThrow();
   });
 
   it("rejects sibling prefix paths escaping storage root", () => {

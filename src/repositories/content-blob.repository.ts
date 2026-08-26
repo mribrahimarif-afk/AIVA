@@ -16,12 +16,30 @@ export interface ContentBlobRepository {
 }
 
 export function createContentBlobRepository(db: PrismaClient): ContentBlobRepository {
-  return {
+  const repo: ContentBlobRepository = {
     async create(input) {
-      const row = await db.contentBlob.create({
-        data: input,
-      });
-      return toContentBlob(row);
+      try {
+        const row = await db.contentBlob.create({
+          data: input,
+        });
+        return toContentBlob(row);
+      } catch (err) {
+        const isP2002 =
+          typeof err === "object" &&
+          err !== null &&
+          "code" in err &&
+          (err as { code: unknown }).code === "P2002";
+
+        if (isP2002) {
+          // Retry findByChecksum if concurrent request created the record
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const existing = await repo.findByChecksum(input.checksum);
+            if (existing) return existing;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+        }
+        throw err;
+      }
     },
 
     async findByChecksum(checksum) {
@@ -38,4 +56,6 @@ export function createContentBlobRepository(db: PrismaClient): ContentBlobReposi
       return row ? toContentBlob(row) : null;
     },
   };
+
+  return repo;
 }

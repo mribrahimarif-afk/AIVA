@@ -17,6 +17,15 @@ import type { ProductRepository } from "@/repositories/product.repository";
 import type { BrandRepository } from "@/repositories/brand.repository";
 import { logger } from "@/infrastructure/logging/logger";
 
+function isUniqueConstraintError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: unknown }).code === "P2002"
+  );
+}
+
 export interface ProductService {
   createProduct(input: CreateProductInput): Promise<Product>;
   getProduct(id: string): Promise<Product>;
@@ -61,22 +70,32 @@ export function createProductService(
         );
       }
 
-      const product = await productRepo.create({
-        brandId: parseResult.data.brandId,
-        name: parseResult.data.name,
-        slug: parseResult.data.slug!,
-        description: parseResult.data.description,
-      });
+      try {
+        const product = await productRepo.create({
+          brandId: parseResult.data.brandId,
+          name: parseResult.data.name,
+          slug: parseResult.data.slug!,
+          description: parseResult.data.description,
+        });
 
-      logger.info({
-        event: "product.created",
-        productId: product.id,
-        brandId: product.brandId,
-        slug: product.slug,
-        message: `Created product '${product.name}'`,
-      });
+        logger.info({
+          event: "product.created",
+          productId: product.id,
+          brandId: product.brandId,
+          slug: product.slug,
+          message: `Created product '${product.name}'`,
+        });
 
-      return product;
+        return product;
+      } catch (err) {
+        if (isUniqueConstraintError(err)) {
+          throw new ValidationError(
+            `Product with slug '${generatedSlug}' already exists under brand '${brand.name}'`,
+            { brandId: input.brandId, slug: generatedSlug }
+          );
+        }
+        throw err;
+      }
     },
 
     async getProduct(id) {
@@ -116,20 +135,30 @@ export function createProductService(
         }
       }
 
-      const updated = await productRepo.update(id, {
-        name: parseResult.data.name,
-        slug: newSlug,
-        description: parseResult.data.description,
-      });
+      try {
+        const updated = await productRepo.update(id, {
+          name: parseResult.data.name,
+          slug: newSlug,
+          description: parseResult.data.description,
+        });
 
-      logger.info({
-        event: "product.updated",
-        productId: updated.id,
-        brandId: updated.brandId,
-        message: `Updated product '${updated.name}'`,
-      });
+        logger.info({
+          event: "product.updated",
+          productId: updated.id,
+          brandId: updated.brandId,
+          message: `Updated product '${updated.name}'`,
+        });
 
-      return updated;
+        return updated;
+      } catch (err) {
+        if (isUniqueConstraintError(err)) {
+          throw new ValidationError(
+            `Product with slug '${newSlug || product.slug}' already exists under brand`,
+            { brandId: product.brandId, slug: newSlug || product.slug }
+          );
+        }
+        throw err;
+      }
     },
 
     async listProductsByBrand(brandId) {
@@ -176,22 +205,33 @@ export function createProductService(
         });
       }
 
-      const alias = await productRepo.addAlias({
-        productId: input.productId,
-        alias: rawAlias,
-        normalizedAlias: normalized,
-      });
+      try {
+        const alias = await productRepo.addAlias({
+          productId: input.productId,
+          alias: rawAlias,
+          normalizedAlias: normalized,
+        });
 
-      logger.info({
-        event: "product.alias_added",
-        productId: input.productId,
-        aliasId: alias.id,
-        alias: alias.alias,
-        normalizedAlias: alias.normalizedAlias,
-        message: `Added alias '${alias.alias}' to product`,
-      });
+        logger.info({
+          event: "product.alias_added",
+          productId: input.productId,
+          aliasId: alias.id,
+          alias: alias.alias,
+          normalizedAlias: alias.normalizedAlias,
+          message: `Added alias '${alias.alias}' to product`,
+        });
 
-      return alias;
+        return alias;
+      } catch (err) {
+        if (isUniqueConstraintError(err)) {
+          throw new ValidationError(`Alias '${rawAlias}' already exists for this product`, {
+            productId: input.productId,
+            alias: rawAlias,
+            normalizedAlias: normalized,
+          });
+        }
+        throw err;
+      }
     },
 
     async removeAlias(aliasId) {
