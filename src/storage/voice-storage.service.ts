@@ -59,22 +59,24 @@ export class VoiceStorageService {
     const projectAudioDir = getProjectSubdirPath(projectId, "audio");
     await this.mkdirFn(projectAudioDir, { recursive: true });
 
-    // 2. Write completely flushed temp file
+    // 2. Define source temp path and target content-addressed path
     const tempFileName = `voice-stage-${crypto.randomUUID()}.wav`;
     const tempFilePath = path.join(tempRoot, tempFileName);
 
-    await this.writeFileFn(tempFilePath, audioData);
-
-    // 3. Define target content-addressed path
     const targetFileName = `${audioSha256}.wav`;
     const targetFilePath = path.join(projectAudioDir, targetFileName);
     const storageRef = toStorageRelativePath(targetFilePath);
 
-    // 4. Atomic exclusive publication
+    // 3. Cleanup ownership begins BEFORE the source write.
+    //    Every failure path — including a partial source write — will reach this finally.
     let newlyCreated = false;
     let destTempFilePath: string | undefined;
 
     try {
+      // Write completely flushed source temp file; cleanup is guaranteed from this point.
+      await this.writeFileFn(tempFilePath, audioData);
+
+      // 4. Atomic exclusive publication
       try {
         // Primary: atomic hard-link publication from tempRoot to destination
         await this.linkFn(tempFilePath, targetFilePath);
@@ -109,18 +111,19 @@ export class VoiceStorageService {
         }
       }
     } finally {
-      // 5. Always clean operation-owned temporary files
+      // 5. Always clean operation-owned temporary files, ENOENT tolerated.
+      //    Canonical content-addressed WAVs are never touched here.
       if (destTempFilePath) {
         try {
           await this.unlinkFn(destTempFilePath);
         } catch {
-          // Ignore unlink error for destination temp file if already cleaned
+          // Ignore unlink error for destination temp file (ENOENT or already cleaned)
         }
       }
       try {
         await this.unlinkFn(tempFilePath);
       } catch {
-        // Ignore unlink error for source temp file if already cleaned
+        // Ignore unlink error for source temp file (ENOENT or already cleaned)
       }
     }
 

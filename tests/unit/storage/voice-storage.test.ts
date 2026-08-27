@@ -176,5 +176,54 @@ describe("VoiceStorageService Unit & Path Security Tests", () => {
 
       await expect(failingLinkService.stageAndPublishAudio(sampleAudio, projId)).rejects.toThrow(StorageError);
     });
+
+    it("proves partial source-temp write failure cleans source temp and does not publish canonical WAV", async () => {
+      const projId = `test-proj-voice-storage-${crypto.randomUUID()}`;
+      const expectedSha = crypto.createHash("sha256").update(sampleAudio).digest("hex").toLowerCase();
+      const canonicalRef = `projects/${projId}/audio/${expectedSha}.wav`;
+      const canonicalPath = resolveStoragePath(canonicalRef);
+
+      // Track the source staging temp path that was created before the throw
+      let capturedSourceTemp: string | undefined;
+
+      const partialWriteService = new VoiceStorageService({
+        writeFile: async (filePath, data) => {
+          // 1. Write partial content to prove the file actually exists on disk
+          const partial = Buffer.isBuffer(data)
+            ? data.slice(0, Math.max(1, Math.floor(data.length / 2)))
+            : Buffer.from(String(data)).slice(0, 4);
+          await fs.promises.writeFile(filePath, partial);
+          // Record the path of the partially-created file
+          capturedSourceTemp = String(filePath);
+          // 2. Then throw, simulating a mid-write I/O error
+          throw new Error("Simulated partial write failure — disk full");
+        },
+      });
+
+      let thrownError: unknown;
+      try {
+        await partialWriteService.stageAndPublishAudio(sampleAudio, projId);
+      } catch (err) {
+        thrownError = err;
+      }
+
+      // stageAndPublishAudio must reject
+      expect(thrownError).toBeDefined();
+
+      // Source partial temp must have been created (proving the write ran)
+      expect(capturedSourceTemp).toBeDefined();
+
+      // Source partial temp must be cleaned up by the finally block
+      expect(fs.existsSync(capturedSourceTemp!)).toBe(false);
+
+      // Canonical content-addressed WAV must NOT be published
+      expect(fs.existsSync(canonicalPath)).toBe(false);
+
+      // The surfaced error must not expose absolute filesystem paths
+      const errorStr = String(thrownError instanceof Error ? thrownError.message : thrownError);
+      const storageRoot = getStorageRoot();
+      expect(errorStr).not.toContain(storageRoot);
+      expect(errorStr).not.toContain(capturedSourceTemp!);
+    });
   });
 });
