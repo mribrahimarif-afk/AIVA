@@ -24,16 +24,22 @@ export class DirectorExecutionBudget {
   readonly maxTotalCalls: number;
   readonly maxPrimaryAttempts: number;
   readonly maxFallbackAttempts: number;
+  readonly maxOpenRouterAttempts: number;
   totalCallsUsed = 0;
   primaryAttemptsUsed = 0;
   fallbackAttemptsUsed = 0;
+  openRouterAttemptsUsed = 0;
   primaryTimeoutEncountered = false;
   fallbackEligibleEncountered = false;
+  readonly timedOutRoutes: Set<string> = new Set();
+  readonly rateLimitedRoutes: Set<string> = new Set();
+  readonly routeAttempts: Map<string, number> = new Map();
 
-  constructor(options?: DirectorExecutionBudgetOptions) {
+  constructor(options?: DirectorExecutionBudgetOptions & { maxOpenRouterAttempts?: number }) {
     this.maxTotalCalls = options?.maxTotalCalls ?? 4;
     this.maxPrimaryAttempts = options?.maxPrimaryAttempts ?? 2;
     this.maxFallbackAttempts = options?.maxFallbackAttempts ?? 2;
+    this.maxOpenRouterAttempts = options?.maxOpenRouterAttempts ?? 2;
   }
 
   canMakePrimaryCall(providerPrimaryLimit?: number): boolean {
@@ -45,7 +51,8 @@ export class DirectorExecutionBudget {
     return (
       this.totalCallsUsed < this.maxTotalCalls &&
       this.primaryAttemptsUsed < primaryLimit &&
-      !this.primaryTimeoutEncountered
+      !this.primaryTimeoutEncountered &&
+      !this.rateLimitedRoutes.has("gemini-primary")
     );
   }
 
@@ -57,8 +64,32 @@ export class DirectorExecutionBudget {
 
     return (
       this.totalCallsUsed < this.maxTotalCalls &&
-      this.fallbackAttemptsUsed < fallbackLimit
+      this.fallbackAttemptsUsed < fallbackLimit &&
+      !this.timedOutRoutes.has("gemini-fallback") &&
+      !this.rateLimitedRoutes.has("gemini-fallback")
     );
+  }
+
+  canMakeRouteCall(routeId: string, maxRouteAttempts = 2): boolean {
+    const attempts = this.routeAttempts.get(routeId) ?? 0;
+    return (
+      this.totalCallsUsed < this.maxTotalCalls &&
+      attempts < maxRouteAttempts &&
+      !this.timedOutRoutes.has(routeId) &&
+      !this.rateLimitedRoutes.has(routeId)
+    );
+  }
+
+  /**
+   * Starvation guard: allows same-route retry only if remaining calls exceed
+   * the number of untried downstream routes.
+   */
+  canRetryOnRoute(routeId: string, untriedDownstreamCount: number, maxRouteAttempts = 2): boolean {
+    if (!this.canMakeRouteCall(routeId, maxRouteAttempts)) {
+      return false;
+    }
+    const remainingCalls = this.maxTotalCalls - this.totalCallsUsed;
+    return remainingCalls > untriedDownstreamCount;
   }
 
   hasRemainingBudget(): boolean {
@@ -68,15 +99,45 @@ export class DirectorExecutionBudget {
   recordPrimaryCall(): void {
     this.totalCallsUsed++;
     this.primaryAttemptsUsed++;
+    this.routeAttempts.set("gemini-primary", (this.routeAttempts.get("gemini-primary") ?? 0) + 1);
   }
 
   recordFallbackCall(): void {
     this.totalCallsUsed++;
     this.fallbackAttemptsUsed++;
+    this.routeAttempts.set("gemini-fallback", (this.routeAttempts.get("gemini-fallback") ?? 0) + 1);
+  }
+
+  recordRouteCall(routeId: string): void {
+    this.totalCallsUsed++;
+    const current = this.routeAttempts.get(routeId) ?? 0;
+    this.routeAttempts.set(routeId, current + 1);
+
+    if (routeId === "gemini-primary") {
+      this.primaryAttemptsUsed++;
+    } else if (routeId === "gemini-fallback") {
+      this.fallbackAttemptsUsed++;
+    } else if (routeId === "openrouter" || routeId.startsWith("openrouter")) {
+      this.openRouterAttemptsUsed++;
+    }
   }
 
   recordPrimaryTimeout(): void {
     this.primaryTimeoutEncountered = true;
+    this.fallbackEligibleEncountered = true;
+    this.timedOutRoutes.add("gemini-primary");
+  }
+
+  recordRouteTimeout(routeId: string): void {
+    this.timedOutRoutes.add(routeId);
+    this.fallbackEligibleEncountered = true;
+    if (routeId === "gemini-primary") {
+      this.primaryTimeoutEncountered = true;
+    }
+  }
+
+  recordRouteRateLimited(routeId: string): void {
+    this.rateLimitedRoutes.add(routeId);
     this.fallbackEligibleEncountered = true;
   }
 

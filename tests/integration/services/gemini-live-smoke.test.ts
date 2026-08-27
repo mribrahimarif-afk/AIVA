@@ -34,4 +34,30 @@ describe("Gemini Live API Smoke Test (Opt-in)", () => {
     },
     60000
   );
+
+  it.skipIf(!hasApiKey)(
+    "runs a minimal live Gemini Director analysis on gemini-3.6-flash fallback model when opt-in is enabled",
+    async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: process.env.GEMINI_API_KEY,
+        model: "gemini-3.6-flash",
+      });
+
+      const tinyScript = "Mazedar crispy chicken burger.";
+      const units = unitizeScript(tinyScript);
+
+      const rawOutput = await provider.analyze({
+        scriptUnits: units,
+      });
+
+      expect(rawOutput).toBeDefined();
+      expect(rawOutput.model).toBe("gemini-3.6-flash");
+      expect(rawOutput.scenes.length).toBeGreaterThanOrEqual(1);
+
+      const validation = validateAndReconstructPlan(rawOutput, units, tinyScript);
+      expect(validation.success).toBe(true);
+      expect(validation.scenes!.map((s) => s.text).join("")).toBe(tinyScript);
+    },
+    60000
+  );
 });

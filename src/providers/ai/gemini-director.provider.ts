@@ -209,7 +209,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
   constructor(options: GeminiDirectorProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || "";
     this.modelName = options.model?.trim() || "gemini-3.7-flash";
-    this.fallbackModelName = options.fallbackModel?.trim() || "gemini-2.5-flash";
+    this.fallbackModelName = options.fallbackModel?.trim() || "gemini-3.6-flash";
     this.logger = options.logger;
     this.timeoutMs =
       typeof options.timeoutMs === "number" &&
@@ -251,6 +251,25 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     return this.executeWithRetryAndFallback(repairPrompt, budget);
   }
 
+  async callDirect(
+    action: "analyze" | "repair",
+    model: string,
+    input: DirectorPromptInput | DirectorRepairInput
+  ): Promise<RawDirectorOutput> {
+    this.assertConfigured();
+
+    const prompt =
+      action === "analyze"
+        ? this.buildAnalysisPrompt(input as DirectorPromptInput)
+        : this.buildRepairPrompt(input as DirectorRepairInput);
+
+    const result = await this.callGeminiApi(prompt, model);
+    return {
+      ...result,
+      model,
+    };
+  }
+
   private createDefaultBudget(): DirectorExecutionBudget {
     const primaryLimit = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
     const fallbackLimit = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
@@ -264,6 +283,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
   private assertConfigured(): void {
     if (!this.isConfigured() || !this.client) {
       throw new ProviderError(this.id, "Gemini API key is not configured. Director analysis is unavailable.", {
+        code: "AUTH_FAILURE",
         isConfigured: false,
       });
     }
@@ -372,6 +392,12 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
           throw this.normalizeError(err);
         }
 
+        // RATE_LIMITED (429) is a SWITCH-ONLY condition: no same-model retry
+        if (this.isRateLimitError(err)) {
+          budget.recordRouteRateLimited("gemini-primary");
+          break;
+        }
+
         // On full primary timeout, do not burn another 45 seconds on primary; fail over promptly
         if (this.isTimeoutError(err)) {
           budget.recordPrimaryTimeout();
@@ -396,7 +422,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       }
     }
 
-    // --- Phase 2: Fallback Model (this.fallbackModelName, e.g. gemini-2.5-flash) ---
+    // --- Phase 2: Fallback Model (this.fallbackModelName, e.g. gemini-3.6-flash) ---
     const canFallback =
       this.fallbackModelName &&
       this.fallbackModelName !== this.modelName &&
@@ -436,7 +462,13 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
             throw this.normalizeError(err);
           }
 
+          if (this.isRateLimitError(err)) {
+            budget.recordRouteRateLimited("gemini-fallback");
+            break;
+          }
+
           if (this.isTimeoutError(err)) {
+            budget.recordRouteTimeout("gemini-fallback");
             break;
           }
 
@@ -557,11 +589,27 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     return false;
   }
 
+  private isRateLimitError(err: unknown): boolean {
+    if (err instanceof ProviderError) {
+      return err.details?.code === "RATE_LIMITED" || err.details?.status === 429;
+    }
+    if (err instanceof Error) {
+      const msg = err.message.toLowerCase();
+      return (
+        msg.includes("429") ||
+        msg.includes("rate limit") ||
+        msg.includes("quota") ||
+        msg.includes("resource_exhausted")
+      );
+    }
+    return false;
+  }
+
   private isFallbackEligibleError(err: unknown): boolean {
     if (this.isNonRetryableError(err)) {
       return false;
     }
-    if (this.isTimeoutError(err)) {
+    if (this.isTimeoutError(err) || this.isRateLimitError(err)) {
       return true;
     }
     if (err instanceof ProviderError) {
@@ -603,6 +651,9 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     if (err instanceof ProviderError && typeof err.details?.code === "string") {
       return sanitizeDetailCode(err.details.code);
     }
+    if (this.isRateLimitError(err)) {
+      return "RATE_LIMITED";
+    }
     if (this.isTimeoutError(err)) {
       return "TIMEOUT";
     }
@@ -640,7 +691,6 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       const code = err.details?.code;
       if (
         code === "AUTH_FAILURE" ||
-        code === "RATE_LIMITED" ||
         code === "SCHEMA_VALIDATION_FAILED" ||
         code === "MALFORMED_JSON" ||
         code === "GENERATION_TERMINATED" ||

@@ -139,7 +139,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
       if (!directorAiProvider.isConfigured()) {
         throw new ProviderError(
           directorAiProvider.id,
-          "Gemini AI provider is not configured. Please set GEMINI_API_KEY.",
+          "AI provider is not configured. Please set GEMINI_API_KEY or OPENROUTER_API_KEY.",
           { isConfigured: false }
         );
       }

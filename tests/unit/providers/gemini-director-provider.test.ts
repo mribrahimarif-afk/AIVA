@@ -49,7 +49,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
     expect(provider.isConfigured()).toBe(true);
     expect(provider.id).toBe("gemini-director");
     expect(provider.modelName).toBe("gemini-3.7-flash");
-    expect(provider.fallbackModelName).toBe("gemini-2.5-flash");
+    expect(provider.fallbackModelName).toBe("gemini-3.6-flash");
   });
 
   describe("Model Failover & Resilience Contract Tests", () => {
@@ -57,7 +57,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
       });
 
       const calledModels: string[] = [];
@@ -81,7 +81,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
       });
 
@@ -106,7 +106,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       expect(result.model).toBe("gemini-3.7-flash");
     });
 
-    it("3. PRIMARY UPSTREAM_UNAVAILABLE -> FALLBACK SUCCESS: primary exhausted -> fallback gemini-2.5-flash succeeds, log emitted", async () => {
+    it("3. PRIMARY UPSTREAM_UNAVAILABLE -> FALLBACK SUCCESS: primary exhausted -> fallback gemini-3.6-flash succeeds, log emitted", async () => {
       const loggedEvents: unknown[] = [];
       const testLogger = {
         warn: (ctx: unknown) => loggedEvents.push(ctx),
@@ -118,7 +118,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
         logger: testLogger,
       });
@@ -139,21 +139,21 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const result = await provider.analyze({ scriptUnits: units });
 
       // Primary was attempted up to 2 times, then fallback succeeded on 1st attempt
-      expect(calledModels).toEqual(["gemini-3.7-flash", "gemini-3.7-flash", "gemini-2.5-flash"]);
-      expect(result.model).toBe("gemini-2.5-flash");
+      expect(calledModels).toEqual(["gemini-3.7-flash", "gemini-3.7-flash", "gemini-3.6-flash"]);
+      expect(result.model).toBe("gemini-3.6-flash");
 
       // Verify safe failover log
       expect(loggedEvents).toHaveLength(1);
       const logEvent = loggedEvents[0] as Record<string, unknown>;
       expect(logEvent.event).toBe("director.provider_fallback");
       expect(logEvent.fromModel).toBe("gemini-3.7-flash");
-      expect(logEvent.toModel).toBe("gemini-2.5-flash");
+      expect(logEvent.toModel).toBe("gemini-3.6-flash");
       expect(logEvent.reason).toBe("UPSTREAM_UNAVAILABLE");
       expect(logEvent.primaryAttempts).toBe(2);
       expect(typeof logEvent.elapsedMs).toBe("number");
     });
 
-    it("4. PRIMARY TIMEOUT -> FALLBACK SUCCESS: primary times out -> immediate fallback to gemini-2.5-flash without burning second timeout on primary", async () => {
+    it("4. PRIMARY TIMEOUT -> FALLBACK SUCCESS: primary times out -> immediate fallback to gemini-3.6-flash without burning second timeout on primary", async () => {
       const loggedEvents: unknown[] = [];
       const testLogger = {
         warn: (ctx: unknown) => loggedEvents.push(ctx),
@@ -165,7 +165,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 50,
         maxRetries: 2,
         logger: testLogger,
@@ -187,8 +187,8 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const result = await provider.analyze({ scriptUnits: units });
 
       // Primary timed out ONCE and promptly failed over to fallback model (1 primary call + 1 fallback call)
-      expect(calledModels).toEqual(["gemini-3.7-flash", "gemini-2.5-flash"]);
-      expect(result.model).toBe("gemini-2.5-flash");
+      expect(calledModels).toEqual(["gemini-3.7-flash", "gemini-3.6-flash"]);
+      expect(result.model).toBe("gemini-3.6-flash");
 
       expect(loggedEvents).toHaveLength(1);
       const logEvent = loggedEvents[0] as Record<string, unknown>;
@@ -200,7 +200,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
       });
 
@@ -226,7 +226,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
       });
 
@@ -250,7 +250,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
       });
 
@@ -268,14 +268,14 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         /rate limit exceeded/
       );
       // Retried on primary up to limit, but NEVER called fallback model
-      expect(calledModels).not.toContain("gemini-2.5-flash");
+      expect(calledModels).not.toContain("gemini-3.6-flash");
     });
 
     it("8. MALFORMED JSON / SCHEMA VALIDATION ERROR: fails with NO fallback", async () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
       });
 
@@ -297,7 +297,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         maxRetries: 2,
       });
 
@@ -319,8 +319,8 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       expect(calledModels).toEqual([
         "gemini-3.7-flash",
         "gemini-3.7-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.6-flash",
       ]);
       expect(calledModels.length).toBeLessThanOrEqual(4);
     });
@@ -329,7 +329,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
       });
 
       (provider as unknown as { client: { models: { generateContent: (args: { model: string }) => Promise<unknown> } } }).client = {
@@ -351,7 +351,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "fake-api-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
       });
 
       const calledModels: string[] = [];
@@ -373,8 +373,8 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         validationErrors: ["Scene 1 missing unit u0001"],
       });
 
-      expect(calledModels).toContain("gemini-2.5-flash");
-      expect(result.model).toBe("gemini-2.5-flash");
+      expect(calledModels).toContain("gemini-3.6-flash");
+      expect(result.model).toBe("gemini-3.6-flash");
     });
   });
 
@@ -764,7 +764,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         const provider = new GeminiDirectorProvider({
           apiKey: "test-configured-key",
           model: "gemini-3.7-flash",
-          fallbackModel: "gemini-2.5-flash",
+          fallbackModel: "gemini-3.6-flash",
           timeoutMs: 5000,
           maxRetries: input as number,
         });
@@ -791,7 +791,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "test-configured-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 5000,
         maxRetries: 2,
       });
@@ -854,7 +854,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
 
       // 1. Initial analyze: uses 2 primary calls + 1 fallback call = 3 calls
       const analyzeOutput = await provider.analyze({ scriptUnits: units, budget });
-      expect(analyzeOutput.model).toBe("gemini-2.5-flash");
+      expect(analyzeOutput.model).toBe("gemini-3.6-flash");
       expect(callCount).toBe(3);
       expect(budget.totalCallsUsed).toBe(3);
       expect(budget.primaryAttemptsUsed).toBe(2);
@@ -877,8 +877,8 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       expect(calledModels).toEqual([
         "gemini-3.7-flash",
         "gemini-3.7-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.6-flash",
       ]);
     });
 
@@ -886,7 +886,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "test-configured-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 5000,
         maxRetries: 2,
       });
@@ -956,7 +956,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "test-configured-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 5000,
         maxRetries: 2,
       });
@@ -1011,7 +1011,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         budget,
       });
 
-      expect(repaired.model).toBe("gemini-2.5-flash");
+      expect(repaired.model).toBe("gemini-3.6-flash");
       expect(callCount).toBe(4);
       expect(budget.totalCallsUsed).toBe(4);
       expect(budget.hasRemainingBudget()).toBe(false);
@@ -1021,7 +1021,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "test-configured-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 5000,
         maxRetries: 2,
       });
@@ -1120,14 +1120,14 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         budget,
       });
 
-      expect(repairOut.model).toBe("gemini-2.5-flash");
+      expect(repairOut.model).toBe("gemini-3.6-flash");
       expect(callCount).toBe(4);
       expect(budget.totalCallsUsed).toBe(4);
       expect(calledModels).toEqual([
         "gemini-3.7-flash",
         "gemini-3.7-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.6-flash",
       ]);
     });
 
@@ -1135,7 +1135,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "test-configured-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 5000,
         maxRetries: 2,
       });
@@ -1220,7 +1220,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       };
 
       const analyzeOut = await provider.analyze({ scriptUnits: units, budget });
-      expect(analyzeOut.model).toBe("gemini-2.5-flash");
+      expect(analyzeOut.model).toBe("gemini-3.6-flash");
       expect(callCount).toBe(2);
       expect(budget.primaryTimeoutEncountered).toBe(true);
 
@@ -1231,13 +1231,13 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         budget,
       });
 
-      expect(repairOut.model).toBe("gemini-2.5-flash");
+      expect(repairOut.model).toBe("gemini-3.6-flash");
       expect(callCount).toBe(3);
       // Verify models called: primary (timed out) -> fallback -> fallback (repair)
       expect(calledModels).toEqual([
         "gemini-3.7-flash",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.6-flash",
       ]);
     });
 
@@ -1245,7 +1245,7 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
       const provider = new GeminiDirectorProvider({
         apiKey: "test-configured-key",
         model: "gemini-3.7-flash",
-        fallbackModel: "gemini-2.5-flash",
+        fallbackModel: "gemini-3.6-flash",
         timeoutMs: 5000,
         maxRetries: 2,
       });
