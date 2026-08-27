@@ -1,10 +1,41 @@
+import type { ScriptUnit, RawDirectorOutput } from "@/domain/director";
+
+export interface BrandContextForDirector {
+  name: string;
+}
+
+export interface ProductContextForDirector {
+  name: string;
+  description?: string | null;
+  aliases: string[];
+}
+
+export interface DirectorPromptInput {
+  scriptUnits: ScriptUnit[];
+  brandContext?: BrandContextForDirector;
+  productContext?: ProductContextForDirector;
+}
+
+export interface DirectorRepairInput extends DirectorPromptInput {
+  rawOutput: unknown;
+  validationErrors: string[];
+}
+
 /**
- * Contract for future AI text/script/planning providers (e.g. Gemini).
- * No implementation exists in TASK-001 — this interface exists so
- * services can be written against it ahead of the actual integration.
+ * AI Provider interface for Director script intelligence and scene planning.
+ */
+export interface DirectorAiProvider {
+  readonly id: string;
+  readonly modelName: string;
+  isConfigured(): boolean;
+  analyze(input: DirectorPromptInput): Promise<RawDirectorOutput>;
+  repair(input: DirectorRepairInput): Promise<RawDirectorOutput>;
+}
+
+/**
+ * Legacy/base AI text provider contract.
  */
 export interface AiProvider {
   readonly id: string;
-
   generateText(prompt: string, options?: Record<string, unknown>): Promise<string>;
 }

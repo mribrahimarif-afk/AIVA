@@ -5,7 +5,7 @@
 AIVA Studio is a personal-use application for assembling video projects from
 scripts, voice, and stock/AI-generated assets.
 
-This repository contains **TASK-001** (foundation) & **TASK-002** (AIVA Vault: Brand, Product & Media Asset Library).
+This repository contains **TASK-001** (foundation), **TASK-002** (AIVA Vault: Brand, Product & Media Asset Library), and **TASK-003** (AIVA Director: Gemini-Powered Script Intelligence & Scene Planning V1).
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ npx prisma migrate deploy
 npm run dev
 ```
 
-`npx prisma migrate deploy` ensures `prisma/dev.db` is created and all migrations (`20260826121100_init`, `20260827020000_vault_brand_product_assets`) are applied cleanly before startup. `src/infrastructure/db/client.ts` automatically creates the parent `prisma/` directory if missing, preventing SQLite Error Code 14 (`Unable to open the database file`).
+`npx prisma migrate deploy` ensures `prisma/dev.db` is created and all migrations (`20260826121100_init`, `20260827020000_vault_brand_product_assets`, `20260827080000_director_scene_plan`) are applied cleanly before startup. `src/infrastructure/db/client.ts` automatically creates the parent `prisma/` directory if missing, preventing SQLite Error Code 14 (`Unable to open the database file`).
 
 ## Environment Configuration
 
@@ -36,6 +36,10 @@ Key configuration options in [.env.example](.env.example):
 - `AIVA_MAX_UPLOAD_BYTES` — maximum upload payload size in bytes (default: `524288000` = 500 MB)
 - `AIVA_DEFAULT_ASPECT_RATIO` — default aspect ratio (`9:16` | `16:9` | `1:1`)
 - `AIVA_LOG_LEVEL` — logging level (`debug` | `info` | `warn` | `error`)
+- `GEMINI_API_KEY` — Google Gemini API key (server-only secret; Director reports unconfigured if empty)
+- `GEMINI_MODEL` — Gemini model identifier (default: `gemini-3.7-flash`)
+- `GEMINI_TIMEOUT_MS` — timeout for Gemini API calls in ms (default: `45000`)
+- `DIRECTOR_MAX_SCRIPT_CHARS` — maximum allowed script character count (default: `50000`)
 
 ## Key Commands
 

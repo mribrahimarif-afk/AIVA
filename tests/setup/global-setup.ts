@@ -7,11 +7,32 @@ const TEST_DB_PATH = path.join(ROOT, "prisma", "test.db");
 const TEST_STORAGE_ROOT = path.join(ROOT, ".test-storage");
 
 function cleanup(): void {
-  for (const file of [TEST_DB_PATH, `${TEST_DB_PATH}-journal`]) {
-    if (fs.existsSync(file)) fs.rmSync(file);
+  for (const file of [
+    TEST_DB_PATH,
+    `${TEST_DB_PATH}-journal`,
+    `${TEST_DB_PATH}-wal`,
+    `${TEST_DB_PATH}-shm`,
+  ]) {
+    if (fs.existsSync(file)) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        // Wait 100ms and try once more on Windows
+        try {
+          execSync("timeout /t 1 >nul 2>&1 || ping 127.0.0.1 -n 1 >nul");
+          if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+        } catch {
+          // Ignore
+        }
+      }
+    }
   }
   if (fs.existsSync(TEST_STORAGE_ROOT)) {
-    fs.rmSync(TEST_STORAGE_ROOT, { recursive: true, force: true });
+    try {
+      fs.rmSync(TEST_STORAGE_ROOT, { recursive: true, force: true });
+    } catch {
+      // Ignore
+    }
   }
 }
 
@@ -31,5 +52,5 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
-  cleanup();
+  // Do not delete DB on teardown to avoid Windows file lock race with exiting worker processes
 }
