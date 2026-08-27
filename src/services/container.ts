@@ -39,7 +39,9 @@ const env = getEnv();
 export const directorAiProvider = new GeminiDirectorProvider({
   apiKey: env.GEMINI_API_KEY,
   model: env.GEMINI_MODEL,
+  fallbackModel: env.GEMINI_DIRECTOR_FALLBACK_MODEL,
   timeoutMs: env.GEMINI_TIMEOUT_MS,
+  logger,
 });
 
 export const voiceProvider = new AzureVoiceProvider({

@@ -13,6 +13,7 @@ const envSchema = z.object({
   AIVA_LOG_LEVEL: logLevelSchema.default("info"),
   GEMINI_API_KEY: z.string().optional().default(""),
   GEMINI_MODEL: z.string().trim().min(1).default("gemini-3.7-flash"),
+  GEMINI_DIRECTOR_FALLBACK_MODEL: z.string().trim().min(1).default("gemini-2.5-flash"),
   GEMINI_TIMEOUT_MS: z.coerce.number().int().positive().default(45000),
   DIRECTOR_MAX_SCRIPT_CHARS: z.coerce.number().int().positive().default(50000),
   AZURE_SPEECH_KEY: z.string().optional().default(""),

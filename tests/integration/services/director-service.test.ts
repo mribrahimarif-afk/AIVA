@@ -516,4 +516,150 @@ describe("DirectorService Integration & Atomicity Tests", () => {
     });
     expect(persistedScenes).toHaveLength(updatedPlan.scenes.length);
   });
+
+  it("persists and reports the actual fallback model when provider executes failover", async () => {
+    const script = "Simple script testing fallback model persistence.";
+    const project = await projectRepo.create({
+      name: "Fallback Model Test",
+      script,
+      aspectRatio: "9:16",
+    });
+
+    // Configure fake provider to return fallback model
+    fakeAiProvider.customAnalyze = async (input) => {
+      const defaultPlan = fakeAiProvider.generateDefaultValidPlan(input);
+      return {
+        ...defaultPlan,
+        model: "gemini-2.5-flash",
+      };
+    };
+
+    const plan = await service.analyzeAndPlan(project.id, { script });
+    expect(plan.model).toBe("gemini-2.5-flash");
+
+    // Verify DB persisted record
+    const retrieved = await service.getPlan(project.id);
+    expect(retrieved?.model).toBe("gemini-2.5-flash");
+  });
+
+  it("proves analyze and repair share the same request-scoped budget and counters are preserved", async () => {
+    const script = "Test script for shared request-scoped budget.";
+    const project = await projectRepo.create({
+      name: "Shared Budget Test",
+      script,
+      aspectRatio: "9:16",
+    });
+
+    let budgetAtAnalyze: unknown = null;
+    let budgetAtRepair: unknown = null;
+
+    fakeAiProvider.customAnalyze = async (input) => {
+      budgetAtAnalyze = input.budget;
+      // Simulate that analysis consumed 2 calls on primary
+      input.budget?.recordPrimaryCall();
+      input.budget?.recordPrimaryCall();
+
+      // Return invalid output to force repair
+      return {
+        language: "ENGLISH",
+        contentType: "ADVERTISEMENT",
+        summary: "Invalid initial summary",
+        creativeDirection: "Invalid direction",
+        scenes: [
+          {
+            order: 1,
+            unitIds: [input.scriptUnits[0]?.id || "u0001"], // missing rest
+            purpose: "HOOK",
+            visualBrief: "Brief",
+            visualSourceHint: "STOCK",
+            shotType: "LIFESTYLE",
+            mood: "Energetic",
+            setting: "Beach",
+            subject: "Person",
+            productPresence: "PREFERRED",
+            searchQuery: "beach",
+            keywords: ["beach"],
+            manualAiPrompt: null,
+          },
+        ],
+      };
+    };
+
+    fakeAiProvider.customRepair = async (input) => {
+      budgetAtRepair = input.budget;
+      // Simulate that repair consumed 1 fallback call
+      input.budget?.recordFallbackCall();
+      return fakeAiProvider.generateDefaultValidPlan(input);
+    };
+
+    const plan = await service.analyzeAndPlan(project.id, { script });
+    expect(plan).toBeDefined();
+
+    // Verify exact same budget instance was passed to both analyze and repair
+    expect(budgetAtAnalyze).not.toBeNull();
+    expect(budgetAtAnalyze).toBe(budgetAtRepair);
+
+    const budget = budgetAtRepair as {
+      totalCallsUsed: number;
+      primaryAttemptsUsed: number;
+      fallbackAttemptsUsed: number;
+    };
+    expect(budget.totalCallsUsed).toBe(3);
+    expect(budget.primaryAttemptsUsed).toBe(2);
+    expect(budget.fallbackAttemptsUsed).toBe(1);
+  });
+
+  it("fails safely with ProviderError when analysis exhausts all 4 transport calls and output fails validation", async () => {
+    const script = "Test script for exhausted budget during analysis.";
+    const project = await projectRepo.create({
+      name: "Exhausted Budget Test",
+      script,
+      aspectRatio: "9:16",
+    });
+
+    fakeAiProvider.customAnalyze = async (input) => {
+      // Simulate that analysis exhausted all 4 calls (2 primary + 2 fallback)
+      input.budget?.recordPrimaryCall();
+      input.budget?.recordPrimaryCall();
+      input.budget?.recordFallbackCall();
+      input.budget?.recordFallbackCall();
+
+      // Return invalid output with missing units
+      return {
+        language: "ENGLISH",
+        contentType: "ADVERTISEMENT",
+        summary: "Exhausted attempt summary",
+        creativeDirection: "Direction",
+        scenes: [
+          {
+            order: 1,
+            unitIds: [input.scriptUnits[0]?.id || "u0001"],
+            purpose: "HOOK",
+            visualBrief: "Brief",
+            visualSourceHint: "STOCK",
+            shotType: "LIFESTYLE",
+            mood: "Energetic",
+            setting: "Beach",
+            subject: "Person",
+            productPresence: "PREFERRED",
+            searchQuery: "beach",
+            keywords: ["beach"],
+            manualAiPrompt: null,
+          },
+        ],
+      };
+    };
+
+    let repairWasCalled = false;
+    fakeAiProvider.customRepair = async (input) => {
+      repairWasCalled = true;
+      return fakeAiProvider.generateDefaultValidPlan(input);
+    };
+
+    await expect(service.analyzeAndPlan(project.id, { script })).rejects.toThrow(ProviderError);
+
+    // Verify repair was never invoked because budget was exhausted
+    expect(repairWasCalled).toBe(false);
+    expect(fakeAiProvider.repairCallCount).toBe(0);
+  });
 });
