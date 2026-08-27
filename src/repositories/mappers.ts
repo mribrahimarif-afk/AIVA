@@ -7,6 +7,8 @@ import type {
   ContentBlob as PrismaContentBlob,
   Scene as PrismaScene,
   Asset as PrismaAsset,
+  DirectorPlan as PrismaDirectorPlan,
+  DirectorScene as PrismaDirectorScene,
 } from "@prisma/client";
 import type { Project } from "@/domain/project";
 import { aspectRatioSchema, projectStatusSchema } from "@/domain/project";
@@ -16,6 +18,15 @@ import type { Scene } from "@/domain/scene";
 import { sceneStatusSchema } from "@/domain/scene";
 import type { Asset, ContentBlob } from "@/domain/asset";
 import { assetSourceSchema, assetTypeSchema, vaultRoleSchema } from "@/domain/asset";
+import type { DirectorPlan, DirectorScene } from "@/domain/director";
+import {
+  directorLanguageSchema,
+  directorContentTypeSchema,
+  scenePurposeSchema,
+  visualSourceHintSchema,
+  shotTypeSchema,
+  productPresenceSchema,
+} from "@/domain/director";
 import { DataIntegrityError } from "@/domain/errors";
 
 function parseOrThrow<T>(schema: z.ZodType<T>, value: unknown, field: string, recordId: string): T {
@@ -143,3 +154,94 @@ export function toAsset(row: PrismaAsset): Asset {
     createdAt: row.createdAt,
   };
 }
+
+export function toDirectorScene(row: PrismaDirectorScene): DirectorScene {
+  let parsedUnitIds: string[] = [];
+  try {
+    parsedUnitIds = JSON.parse(row.unitIds) as string[];
+  } catch {
+    throw new DataIntegrityError("Invalid JSON in persisted DirectorScene.unitIds", {
+      recordId: row.id,
+      field: "DirectorScene.unitIds",
+    });
+  }
+
+  let parsedKeywords: string[] = [];
+  try {
+    parsedKeywords = JSON.parse(row.keywords) as string[];
+  } catch {
+    throw new DataIntegrityError("Invalid JSON in persisted DirectorScene.keywords", {
+      recordId: row.id,
+      field: "DirectorScene.keywords",
+    });
+  }
+
+  return {
+    id: row.id,
+    directorPlanId: row.directorPlanId,
+    order: row.order,
+    text: row.text,
+    unitIds: parsedUnitIds,
+    purpose: parseOrThrow(scenePurposeSchema, row.purpose, "DirectorScene.purpose", row.id),
+    visualBrief: row.visualBrief,
+    visualSourceHint: parseOrThrow(
+      visualSourceHintSchema,
+      row.visualSourceHint,
+      "DirectorScene.visualSourceHint",
+      row.id
+    ),
+    shotType: parseOrThrow(shotTypeSchema, row.shotType, "DirectorScene.shotType", row.id),
+    mood: row.mood,
+    setting: row.setting,
+    subject: row.subject,
+    productPresence: parseOrThrow(
+      productPresenceSchema,
+      row.productPresence,
+      "DirectorScene.productPresence",
+      row.id
+    ),
+    searchQuery: row.searchQuery,
+    keywords: parsedKeywords,
+    manualAiPrompt: row.manualAiPrompt ?? null,
+    sourceSpanStart: row.sourceSpanStart,
+    sourceSpanEnd: row.sourceSpanEnd,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export function toDirectorPlan(
+  row: PrismaDirectorPlan & {
+    scenes?: PrismaDirectorScene[];
+  }
+): DirectorPlan {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    originalScript: row.originalScript,
+    scriptHash: row.scriptHash,
+    unitizerVersion: row.unitizerVersion,
+    schemaVersion: row.schemaVersion,
+    promptVersion: row.promptVersion,
+    model: row.model,
+    language: parseOrThrow(
+      directorLanguageSchema,
+      row.language,
+      "DirectorPlan.language",
+      row.id
+    ),
+    contentType: parseOrThrow(
+      directorContentTypeSchema,
+      row.contentType,
+      "DirectorPlan.contentType",
+      row.id
+    ),
+    summary: row.summary,
+    creativeDirection: row.creativeDirection,
+    brandId: row.brandId ?? null,
+    productId: row.productId ?? null,
+    generatedAt: row.generatedAt,
+    scenes: row.scenes ? row.scenes.map(toDirectorScene) : [],
+  };
+}
+

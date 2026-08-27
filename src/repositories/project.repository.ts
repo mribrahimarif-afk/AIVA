@@ -13,6 +13,7 @@ export interface ProjectRepository {
   findById(id: string): Promise<Project | null>;
   findAll(): Promise<Project[]>;
   updateStatus(id: string, status: ProjectStatus): Promise<Project>;
+  updateScript(id: string, script: string): Promise<Project>;
   count(): Promise<number>;
   countByStatus(status: ProjectStatus): Promise<number>;
 }
@@ -42,6 +43,11 @@ export function createProjectRepository(db: PrismaClient): ProjectRepository {
 
     async updateStatus(id, status) {
       const row = await db.project.update({ where: { id }, data: { status } });
+      return toProject(row);
+    },
+
+    async updateScript(id, script) {
+      const row = await db.project.update({ where: { id }, data: { script } });
       return toProject(row);
     },
 

@@ -23,8 +23,9 @@ model Project {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  scenes Scene[]
-  assets Asset[]
+  scenes       Scene[]
+  assets       Asset[]
+  directorPlan DirectorPlan?
 
   @@index([status])
   @@index([createdAt])
@@ -146,3 +147,58 @@ model Asset {
   @@index([source])
   @@map("assets")
 }
+
+model DirectorPlan {
+  id                String   @id @default(cuid())
+  projectId         String   @unique
+  originalScript    String
+  scriptHash        String
+  unitizerVersion   String
+  schemaVersion     String
+  promptVersion     String
+  model             String
+  language          String
+  contentType       String
+  summary           String
+  creativeDirection String
+  brandId           String?
+  productId         String?
+  generatedAt       DateTime @default(now())
+
+  project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scenes            DirectorScene[]
+
+  @@index([projectId])
+  @@index([scriptHash])
+  @@map("director_plans")
+}
+
+model DirectorScene {
+  id               String   @id @default(cuid())
+  directorPlanId   String
+  order            Int
+  text             String
+  unitIds          String   // JSON stringified array of unit IDs
+  purpose          String
+  visualBrief      String
+  visualSourceHint String
+  shotType         String
+  mood             String
+  setting          String
+  subject          String
+  productPresence  String
+  searchQuery      String
+  keywords         String   // JSON stringified array of keywords
+  manualAiPrompt   String?
+  sourceSpanStart  Int
+  sourceSpanEnd    Int
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  directorPlan     DirectorPlan @relation(fields: [directorPlanId], references: [id], onDelete: Cascade)
+
+  @@unique([directorPlanId, order])
+  @@index([directorPlanId])
+  @@map("director_scenes")
+}
+

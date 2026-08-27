@@ -17,6 +17,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@google/genai": "^2.19.0",
     "@prisma/client": "^6.2.1",
     "@types/busboy": "^1.5.4",
     "busboy": "^1.6.0",
