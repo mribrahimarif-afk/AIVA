@@ -71,7 +71,15 @@ export function createDirectorPlanRepository(db: PrismaClient): DirectorPlanRepo
 
     async replacePlan(projectId, plan, scenes) {
       const result = await db.$transaction(async (tx) => {
-        // 1. Upsert the DirectorPlan entity, explicitly stamping generatedAt
+        // 1. Atomically update Project.script with exactScript to ensure 100% source consistency
+        await tx.project.update({
+          where: { id: projectId },
+          data: {
+            script: plan.originalScript,
+          },
+        });
+
+        // 2. Upsert the DirectorPlan entity, explicitly stamping generatedAt
         const savedPlan = await tx.directorPlan.upsert({
           where: { projectId },
           create: {

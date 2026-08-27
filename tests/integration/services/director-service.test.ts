@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { prisma } from "@/infrastructure/db/client";
 import { createProjectRepository } from "@/repositories/project.repository";
 import { createBrandRepository } from "@/repositories/brand.repository";
@@ -364,5 +365,154 @@ describe("DirectorService Integration & Atomicity Tests", () => {
     const planAfterFailure = await service.getPlan(project.id);
     expect(planAfterFailure).not.toBeNull();
     expect(planAfterFailure!.originalScript).toBe(validScript);
+  });
+
+  it("proves complete aggregate rollback when an error occurs mid-transaction during plan replacement", async () => {
+    const oldScript = "Old original script that must survive rollback.";
+    const project = await projectRepo.create({
+      name: "Atomicity Rollback Test",
+      script: oldScript,
+      aspectRatio: "16:9",
+    });
+
+    // 1. Establish initial valid DirectorPlan and scenes
+    const initialPlan = await service.analyzeAndPlan(project.id, {
+      script: oldScript,
+    });
+    expect(initialPlan.originalScript).toBe(oldScript);
+    const initialScenes = await prisma.directorScene.findMany({
+      where: { directorPlanId: initialPlan.id },
+      orderBy: { order: "asc" },
+    });
+    expect(initialScenes.length).toBeGreaterThan(0);
+    const initialSceneIds = initialScenes.map((s) => s.id);
+
+    // 2. Instantiate a service using a repository that fails mid-transaction
+    const failingPlanRepo: typeof directorPlanRepo = {
+      ...directorPlanRepo,
+      async replacePlan(projectId, plan) {
+        return prisma.$transaction(async (tx) => {
+          // Update project.script inside the transaction
+          await tx.project.update({
+            where: { id: projectId },
+            data: { script: plan.originalScript },
+          });
+
+          // Upsert directorPlan inside the transaction
+          await tx.directorPlan.upsert({
+            where: { projectId },
+            create: {
+              projectId,
+              originalScript: plan.originalScript,
+              scriptHash: plan.scriptHash,
+              unitizerVersion: plan.unitizerVersion,
+              schemaVersion: plan.schemaVersion,
+              promptVersion: plan.promptVersion,
+              model: plan.model,
+              language: plan.language,
+              contentType: plan.contentType,
+              summary: plan.summary,
+              creativeDirection: plan.creativeDirection,
+              generatedAt: new Date(),
+            },
+            update: {
+              originalScript: plan.originalScript,
+              scriptHash: plan.scriptHash,
+              unitizerVersion: plan.unitizerVersion,
+              schemaVersion: plan.schemaVersion,
+              promptVersion: plan.promptVersion,
+              model: plan.model,
+              language: plan.language,
+              contentType: plan.contentType,
+              summary: plan.summary,
+              creativeDirection: plan.creativeDirection,
+              generatedAt: new Date(),
+            },
+          });
+
+          // Simulate database error during subsequent transaction step
+          throw new Error("Simulated in-transaction database disk failure during scene insertion");
+        });
+      },
+    };
+
+    const failingService = createDirectorService({
+      directorPlanRepository: failingPlanRepo,
+      projectRepository: projectRepo,
+      brandRepository: brandRepo,
+      productRepository: productRepo,
+      directorAiProvider: fakeAiProvider,
+      logger,
+    });
+
+    const newScript = "New candidate script that should be rolled back completely.";
+
+    // 3. Attempt re-analysis with new script
+    await expect(
+      failingService.analyzeAndPlan(project.id, {
+        script: newScript,
+      })
+    ).rejects.toThrow("Simulated in-transaction database disk failure");
+
+    // 4. Reload all database state and assert 100% rollback of the aggregate
+    const reloadedProject = await projectRepo.findById(project.id);
+    expect(reloadedProject).not.toBeNull();
+    expect(reloadedProject!.script).toBe(oldScript);
+
+    const reloadedPlan = await prisma.directorPlan.findUnique({
+      where: { projectId: project.id },
+    });
+    expect(reloadedPlan).not.toBeNull();
+    expect(reloadedPlan!.originalScript).toBe(oldScript);
+    expect(reloadedPlan!.scriptHash).toBe(initialPlan.scriptHash);
+    expect(reloadedPlan!.summary).toBe(initialPlan.summary);
+    expect(reloadedPlan!.creativeDirection).toBe(initialPlan.creativeDirection);
+
+    const reloadedScenes = await prisma.directorScene.findMany({
+      where: { directorPlanId: initialPlan.id },
+      orderBy: { order: "asc" },
+    });
+    expect(reloadedScenes).toHaveLength(initialScenes.length);
+    expect(reloadedScenes.map((s) => s.id)).toEqual(initialSceneIds);
+    expect(reloadedScenes[0]?.text).toBe(initialScenes[0]?.text);
+  });
+
+  it("proves successful re-analysis atomically updates Project.script, DirectorPlan, and DirectorScenes together", async () => {
+    const initialScript = "Initial script before update.";
+    const project = await projectRepo.create({
+      name: "Atomic Success Test",
+      script: initialScript,
+      aspectRatio: "9:16",
+    });
+
+    const initialPlan = await service.analyzeAndPlan(project.id, {
+      script: initialScript,
+    });
+    expect(initialPlan.originalScript).toBe(initialScript);
+
+    const projectBeforeUpdate = await projectRepo.findById(project.id);
+    expect(projectBeforeUpdate!.script).toBe(initialScript);
+
+    const updatedScript = "Updated script successfully replacing everything in one atomic transaction.";
+    const updatedPlan = await service.analyzeAndPlan(project.id, {
+      script: updatedScript,
+    });
+
+    // Verify Project.script was updated to exact new string
+    const projectAfterUpdate = await projectRepo.findById(project.id);
+    expect(projectAfterUpdate!.script).toBe(updatedScript);
+
+    // Verify DirectorPlan was updated
+    expect(updatedPlan.originalScript).toBe(updatedScript);
+    expect(updatedPlan.scriptHash).toBe(
+      createHash("sha256").update(updatedScript, "utf8").digest("hex")
+    );
+
+    // Verify DirectorScenes match the updated plan
+    const persistedScenes = await prisma.directorScene.findMany({
+      where: { directorPlanId: updatedPlan.id },
+      orderBy: { order: "asc" },
+    });
+    expect(persistedScenes).toHaveLength(updatedPlan.scenes.length);
   });
 });

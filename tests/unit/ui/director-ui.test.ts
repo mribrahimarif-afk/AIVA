@@ -154,4 +154,28 @@ describe("Director UI Components Tests", () => {
     expect(html).toContain("Premium audio commercial showcasing spatial sound capabilities.");
     expect(html).toContain("Planned Scenes");
   });
+
+  it("prioritizes initialPlan.originalScript as the authoritative script over stale project.script in DirectorWorkspace", () => {
+    const projectWithStaleScript: Project = {
+      ...mockProject,
+      script: "Stale project script that was never analyzed.",
+    };
+
+    const analyzedPlan: DirectorPlan = {
+      ...mockPlan,
+      originalScript: "Authoritative analyzed script from DirectorPlan.",
+    };
+
+    const html = renderToString(
+      React.createElement(DirectorWorkspace, {
+        project: projectWithStaleScript,
+        initialPlan: analyzedPlan,
+        isAiConfigured: true,
+        brands: mockBrands,
+      })
+    );
+
+    expect(html).toContain("Authoritative analyzed script from DirectorPlan.");
+    expect(html).not.toContain("Stale project script that was never analyzed.");
+  });
 });

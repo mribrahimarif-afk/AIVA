@@ -164,7 +164,14 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     this.apiKey = options.apiKey?.trim() || "";
     this.modelName = options.model?.trim() || "gemini-3.7-flash";
     this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : 45000;
-    this.maxRetries = options.maxRetries ?? 2;
+
+    // Hard-bounded maxRetries: strictly finite integer within [0, 2] (max 3 total attempts)
+    let retries = 2;
+    if (typeof options.maxRetries === "number" && Number.isFinite(options.maxRetries)) {
+      const floored = Math.floor(options.maxRetries);
+      retries = Math.max(0, Math.min(2, floored));
+    }
+    this.maxRetries = retries;
 
     if (this.apiKey) {
       this.client = new GoogleGenAI({ apiKey: this.apiKey });
@@ -323,9 +330,15 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       if (!rawText) {
         const candidate = response.candidates?.[0];
         const finishReason = candidate?.finishReason;
+        if (finishReason === "SAFETY") {
+          throw new ProviderError(this.id, "Gemini generation blocked by safety filters", {
+            finishReason: "SAFETY",
+            code: "SAFETY_BLOCKED",
+          });
+        }
         if (finishReason && finishReason !== "STOP") {
-          throw new ProviderError(this.id, `Gemini response terminated with reason: ${finishReason}`, {
-            finishReason,
+          throw new ProviderError(this.id, "Gemini generation terminated unexpectedly", {
+            finishReason: String(finishReason),
             code: "GENERATION_TERMINATED",
           });
         }
@@ -338,7 +351,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       try {
         parsedJson = JSON.parse(rawText);
       } catch {
-        throw new ProviderError(this.id, "Failed to parse Gemini structured JSON response", {
+        throw new ProviderError(this.id, "Gemini returned malformed JSON response", {
           code: "MALFORMED_JSON",
         });
       }
@@ -370,14 +383,10 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         code === "AUTH_FAILURE" ||
         code === "SCHEMA_VALIDATION_FAILED" ||
         code === "MALFORMED_JSON" ||
-        code === "GENERATION_TERMINATED"
-      ) {
-        return true;
-      }
-      if (
-        err.message.includes("schema validation") ||
-        err.message.includes("API key") ||
-        err.message.includes("terminated with reason")
+        code === "GENERATION_TERMINATED" ||
+        code === "SAFETY_BLOCKED" ||
+        code === "EMPTY_RESPONSE" ||
+        code === "REQUEST_FAILED"
       ) {
         return true;
       }
@@ -387,9 +396,11 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       const message = err.message.toLowerCase();
       // Auth / permission errors are non-retryable
       if (
-        message.includes("api_key_invalid") ||
+        message.includes("api_key") ||
         message.includes("unauthenticated") ||
         message.includes("permission_denied") ||
+        message.includes("forbidden") ||
+        message.includes("unauthorized") ||
         message.includes("invalid api key") ||
         message.includes("401") ||
         message.includes("403")
@@ -397,7 +408,12 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         return true;
       }
       // Schema / parsing errors are non-retryable
-      if (message.includes("schema validation") || message.includes("json")) {
+      if (
+        message.includes("schema validation") ||
+        message.includes("json.parse") ||
+        message.includes("syntaxerror") ||
+        message.includes("malformed json")
+      ) {
         return true;
       }
     }
@@ -407,42 +423,117 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
 
   private normalizeError(err: unknown): ProviderError {
     if (err instanceof ProviderError) {
-      return err;
+      // Re-construct cleanly to ensure details contains only safe allowlisted keys
+      const safeCode = (err.details?.code as string) || "REQUEST_FAILED";
+      const safeDetails: Record<string, unknown> = { code: safeCode };
+      if (typeof err.details?.timeoutMs === "number") {
+        safeDetails.timeoutMs = err.details.timeoutMs;
+      }
+      if (typeof err.details?.finishReason === "string") {
+        safeDetails.finishReason = err.details.finishReason;
+      }
+      if (Array.isArray(err.details?.schemaIssues)) {
+        safeDetails.schemaIssues = (err.details.schemaIssues as string[]).map((s) => String(s).slice(0, 200));
+      }
+      return new ProviderError(this.id, err.message, safeDetails);
     }
 
     if (err instanceof Error) {
       const message = err.message.toLowerCase();
-      if (message.includes("401") || message.includes("invalid api key") || message.includes("api_key_invalid")) {
-        return new ProviderError(this.id, "Authentication failed: invalid Gemini API key", {
+
+      // 1. Auth & Permission
+      if (
+        message.includes("401") ||
+        message.includes("403") ||
+        message.includes("api_key") ||
+        message.includes("unauthenticated") ||
+        message.includes("permission_denied") ||
+        message.includes("forbidden") ||
+        message.includes("unauthorized") ||
+        message.includes("invalid api key")
+      ) {
+        return new ProviderError(this.id, "Gemini authentication or permission failed", {
           code: "AUTH_FAILURE",
         });
       }
-      if (message.includes("429") || message.includes("quota") || message.includes("rate limit")) {
-        return new ProviderError(this.id, "Gemini rate limit exceeded (HTTP 429). Please try again shortly.", {
+
+      // 2. Rate Limit (429)
+      if (
+        message.includes("429") ||
+        message.includes("quota") ||
+        message.includes("rate limit") ||
+        message.includes("resource_exhausted")
+      ) {
+        return new ProviderError(this.id, "Gemini rate limit exceeded", {
           code: "RATE_LIMITED",
         });
       }
-      if (message.includes("500") || message.includes("503") || message.includes("unavailable")) {
-        return new ProviderError(this.id, "Gemini service is temporarily unavailable (5xx). Please try again.", {
-          code: "UPSTREAM_UNAVAILABLE",
-        });
-      }
-      if (message.includes("timeout") || err.name === "AbortError") {
-        return new ProviderError(this.id, `Gemini request timed out after ${this.timeoutMs}ms`, {
+
+      // 3. Timeout
+      if (message.includes("timeout") || message.includes("etimedout") || err.name === "AbortError") {
+        return new ProviderError(this.id, "Gemini request timed out", {
           code: "TIMEOUT",
           timeoutMs: this.timeoutMs,
         });
       }
 
-      // Redact sensitive details or internal paths
-      const safeMessage = err.message.replace(/key=[^&\s]+/gi, "key=[REDACTED]");
-      return new ProviderError(this.id, `Gemini request failed: ${safeMessage}`, {
+      // 4. Upstream 5xx / Service Unavailable
+      if (
+        message.includes("500") ||
+        message.includes("502") ||
+        message.includes("503") ||
+        message.includes("504") ||
+        message.includes("unavailable") ||
+        message.includes("bad gateway") ||
+        message.includes("service unavailable") ||
+        message.includes("overloaded") ||
+        message.includes("internal server error")
+      ) {
+        return new ProviderError(this.id, "Gemini service temporarily unavailable", {
+          code: "UPSTREAM_UNAVAILABLE",
+        });
+      }
+
+      // 5. Transient Network Failures
+      if (
+        message.includes("econnreset") ||
+        message.includes("econnrefused") ||
+        message.includes("enotfound") ||
+        message.includes("fetch failed") ||
+        message.includes("network error") ||
+        message.includes("socket hang up")
+      ) {
+        return new ProviderError(this.id, "Gemini network connection failed", {
+          code: "NETWORK_FAILURE",
+        });
+      }
+
+      // 6. Malformed JSON
+      if (
+        message.includes("syntaxerror") ||
+        message.includes("json.parse") ||
+        message.includes("malformed json")
+      ) {
+        return new ProviderError(this.id, "Gemini returned malformed JSON response", {
+          code: "MALFORMED_JSON",
+        });
+      }
+
+      // 7. Schema Validation
+      if (message.includes("schema validation")) {
+        return new ProviderError(this.id, "Gemini structured output failed schema validation", {
+          code: "SCHEMA_VALIDATION_FAILED",
+        });
+      }
+
+      // 8. Unknown Request Failure (Allowlist-based fallback: strictly generic safe message and code)
+      return new ProviderError(this.id, "Gemini request failed", {
         code: "REQUEST_FAILED",
       });
     }
 
-    return new ProviderError(this.id, "Unknown Gemini provider failure", {
-      code: "UNKNOWN",
+    return new ProviderError(this.id, "Gemini request failed", {
+      code: "REQUEST_FAILED",
     });
   }
 }

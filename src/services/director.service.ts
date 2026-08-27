@@ -227,11 +227,6 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         }))
       );
 
-      // Also update project.script if it differs
-      if (project.script !== script) {
-        await projectRepository.updateScript(projectId, script);
-      }
-
       const latencyMs = Date.now() - startTime;
       logger.info({
         event: "director.plan_generated",

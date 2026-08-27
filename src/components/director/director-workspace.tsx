@@ -22,7 +22,7 @@ export function DirectorWorkspace({
   isAiConfigured,
   brands,
 }: DirectorWorkspaceProps) {
-  const [script, setScript] = useState(project.script || initialPlan?.originalScript || "");
+  const [script, setScript] = useState(initialPlan?.originalScript ?? project.script ?? "");
   const [selectedBrandId, setSelectedBrandId] = useState<string>(initialPlan?.brandId || "");
   const [selectedProductId, setSelectedProductId] = useState<string>(initialPlan?.productId || "");
   const [plan, setPlan] = useState<DirectorPlan | null>(initialPlan);
