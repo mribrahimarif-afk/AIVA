@@ -113,10 +113,43 @@ Every Gemini response must satisfy:
 
 #### 5. Scope Boundaries & Non-Goals
 TASK-003 explicitly locks the following non-goals for future tasks:
-- No Azure TTS or voice timing.
 - No Pexels / Pixabay stock retrieval or downloads.
 - No vector embeddings or asset ranking.
 - No FFmpeg rendering, timeline assembly, music/SFX, captions, or publishing.
+
+### TASK-004 AIVA Voice Architecture
+
+TASK-004 introduces AIVA Voice: Azure Neural Text-to-Speech integration with source-aligned word-boundary timing and single continuous narration audio track synthesis.
+
+#### 1. End-to-End Pipeline Progression
+The core AIVA video generation pipeline progresses strictly across stages:
+`Director (TASK-003)` → `Voice (TASK-004)` → `future Timeline (TASK-005)`
+
+- **`DirectorPlan.originalScript`** is the authoritative narration source. Input to Azure Speech is strictly plain text with zero SSML, ensuring an uncorrupted character offset mapping `[sourceStart, sourceEnd)` into the original script.
+- **Single Continuous Track**: The script is synthesized in its entirety into one continuous narration WAV file (`Riff24Khz16BitMonoPcm` @ 24kHz / 16-bit / Mono). Scene-level timing is strictly derived downstream in TASK-005.
+
+#### 2. Word Boundary Event & Duration Invariants
+- **100ns Ticks to Milliseconds**: Azure word boundary event offsets and durations are converted using `10,000 ticks = 1 ms` with a deterministic `Math.round()` policy.
+- **Authoritative Audio Duration**: Total narration duration is derived exclusively from the synthesis result's `audioDuration` (in ticks), never inferred from the last word boundary.
+- **Source Alignment**: Transient Azure `event.text` is compared against `originalScript.slice(sourceStart, sourceEnd)`. Mismatches fail closed with `WORD_BOUNDARY_ALIGNMENT_FAILED` without mutating the source text.
+- **Authoritative Reconstructed Text**: Persisted word text is always derived locally from `originalScript.slice(sourceStart, sourceEnd)`.
+
+#### 3. In-Transaction Concurrency (TOCTOU Defense) & Lifecycle
+- **`CURRENT` vs `STALE`**: A `VoiceTrack` stores `sourceScriptHash`. When `DirectorPlan.scriptHash` changes upon script re-analysis, the track transitions to `STALE`.
+- **In-Transaction Concurrency Check**: `VoiceTrackRepository.replaceTrack` executes a single Prisma `$transaction` that re-reads `DirectorPlan` and verifies `currentPlan.scriptHash === capturedScriptHash`. If the script was re-analyzed while synthesis was in flight, the transaction aborts with `SOURCE_CHANGED`.
+- **Foreign Key Relation**: `VoiceTrack.directorPlanId` is a real foreign key with `onDelete: Cascade` referencing `DirectorPlan.id`.
+
+#### 4. Content-Addressed Storage & V1 Safe Orphan Compensation Policy
+- **Content-Addressed Path**: `projects/[projectId]/audio/[audioSha256].wav`.
+- **Atomic No-Clobber Publication**: Temporary files are published using atomic exclusive creation (`COPYFILE_EXCL` / link primitive). Racing operations on the same SHA adopt the pre-existing artifact with `newlyCreated = false`.
+- **V1 Safe Orphan Policy**: Temporary files are always cleaned. Finalized content-addressed WAV blobs are never synchronously deleted on request-time DB failures or VoiceTrack replacement to eliminate races where another concurrent request adopts the same SHA. Future background maintenance/GC may reclaim unreferenced blobs.
+
+#### 5. Scope Boundaries & Non-Goals
+TASK-004 explicitly locks the following non-goals:
+- No automatic scene durations or scene start/end assignments (owned by TASK-005 Timeline).
+- No Pexels / Pixabay stock retrieval or downloads.
+- No vector embeddings or asset ranking.
+- No FFmpeg rendering, video assembly, captions, subtitle rendering, music, or SFX.
 
 ## Error Model & Security
 

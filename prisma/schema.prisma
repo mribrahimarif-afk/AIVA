@@ -26,6 +26,7 @@ model Project {
   scenes       Scene[]
   assets       Asset[]
   directorPlan DirectorPlan?
+  voiceTrack   VoiceTrack?
 
   @@index([status])
   @@index([createdAt])
@@ -167,6 +168,7 @@ model DirectorPlan {
 
   project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   scenes            DirectorScene[]
+  voiceTracks       VoiceTrack[]
 
   @@index([projectId])
   @@index([scriptHash])
@@ -200,5 +202,46 @@ model DirectorScene {
   @@unique([directorPlanId, order])
   @@index([directorPlanId])
   @@map("director_scenes")
+}
+
+model VoiceTrack {
+  id               String   @id @default(cuid())
+  projectId        String   @unique
+  directorPlanId   String
+  sourceScriptHash String
+  provider         String   @default("azure-speech")
+  voiceName        String
+  locale           String
+  outputFormat     String
+  audioSha256      String
+  audioByteCount   Int
+  audioStorageRef  String
+  durationMs       Int
+  generatedAt      DateTime @default(now())
+
+  project          Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  directorPlan     DirectorPlan    @relation(fields: [directorPlanId], references: [id], onDelete: Cascade)
+  boundaries       VoiceBoundary[]
+
+  @@index([projectId])
+  @@index([directorPlanId])
+  @@index([sourceScriptHash])
+  @@map("voice_tracks")
+}
+
+model VoiceBoundary {
+  id              String   @id @default(cuid())
+  voiceTrackId    String
+  order           Int
+  sourceStart     Int
+  sourceEnd       Int
+  audioStartMs    Int
+  audioDurationMs Int
+
+  voiceTrack      VoiceTrack @relation(fields: [voiceTrackId], references: [id], onDelete: Cascade)
+
+  @@unique([voiceTrackId, order])
+  @@index([voiceTrackId])
+  @@map("voice_boundaries")
 }
 

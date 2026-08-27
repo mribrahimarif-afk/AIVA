@@ -16,6 +16,11 @@ import { createVaultService } from "./vault.service";
 import { createHealthService } from "./health.service";
 import { createDirectorService } from "./director.service";
 
+import { createVoiceTrackRepository } from "@/repositories/voice-track.repository";
+import { AzureVoiceProvider } from "@/providers/voice/azure-voice.provider";
+import { voiceStorageService } from "@/storage/voice-storage.service";
+import { VoiceService } from "./voice.service";
+
 /**
  * Composition root wiring Prisma-backed repositories to application services.
  */
@@ -26,6 +31,7 @@ export const repositories = {
   contentBlob: createContentBlobRepository(prisma),
   scene: createSceneRepository(prisma),
   directorPlan: createDirectorPlanRepository(prisma),
+  voiceTrack: createVoiceTrackRepository(prisma),
   asset: createAssetRepository(prisma),
 };
 
@@ -34,6 +40,12 @@ export const directorAiProvider = new GeminiDirectorProvider({
   apiKey: env.GEMINI_API_KEY,
   model: env.GEMINI_MODEL,
   timeoutMs: env.GEMINI_TIMEOUT_MS,
+});
+
+export const voiceProvider = new AzureVoiceProvider({
+  apiKey: env.AZURE_SPEECH_KEY,
+  region: env.AZURE_SPEECH_REGION,
+  timeoutMs: env.VOICE_SYNTHESIS_TIMEOUT_MS,
 });
 
 export const services = {
@@ -55,6 +67,13 @@ export const services = {
     directorAiProvider,
     logger,
     maxScriptChars: env.DIRECTOR_MAX_SCRIPT_CHARS,
+  }),
+  voice: new VoiceService({
+    projectRepository: repositories.project,
+    directorPlanRepository: repositories.directorPlan,
+    voiceTrackRepository: repositories.voiceTrack,
+    voiceProvider,
+    voiceStorageService,
   }),
 };
 

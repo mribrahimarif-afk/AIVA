@@ -17,6 +17,10 @@ const envSchema = z.object({
   DIRECTOR_MAX_SCRIPT_CHARS: z.coerce.number().int().positive().default(50000),
   AZURE_SPEECH_KEY: z.string().optional().default(""),
   AZURE_SPEECH_REGION: z.string().optional().default(""),
+  AZURE_SPEECH_VOICE: z.string().trim().optional().default("ur-PK-AsadNeural"),
+  VOICE_MAX_DURATION_MS: z.coerce.number().int().positive().max(3600000).default(600000),
+  VOICE_SYNTHESIS_TIMEOUT_MS: z.coerce.number().int().positive().min(5000).max(300000).default(60000),
+  VOICE_MAX_AUDIO_BYTES: z.coerce.number().int().positive().min(1024).max(104857600).default(67108864),
   PEXELS_API_KEY: z.string().optional().default(""),
   PIXABAY_API_KEY: z.string().optional().default(""),
 });

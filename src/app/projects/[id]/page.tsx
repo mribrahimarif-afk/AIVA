@@ -1,10 +1,12 @@
 import { notFound } from "next/navigation";
-import { services } from "@/services/container";
+import { services, voiceProvider } from "@/services/container";
 import { NotFoundError } from "@/domain/errors";
 import { Card } from "@/components/ui/card";
 import { ProjectStatusBadge } from "@/components/projects/status-badge";
 import { PipelineVisualization } from "@/components/projects/pipeline-visualization";
 import { DirectorWorkspace } from "@/components/director/director-workspace";
+import { VoiceWorkspace } from "@/components/voice/voice-workspace";
+import { VOICE_PROFILES } from "@/domain/voice";
 
 export const dynamic = "force-dynamic";
 
@@ -24,12 +26,14 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
     notFound();
   }
 
-  const [plan, brands] = await Promise.all([
+  const [plan, brands, voiceTrack] = await Promise.all([
     services.director.getPlan(id),
     services.brand.listBrands(),
+    services.voice.getVoiceTrack(id).catch(() => null),
   ]);
 
   const isAiConfigured = services.director.isAiConfigured();
+  const isVoiceConfigured = voiceProvider.isConfigured();
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -54,6 +58,17 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         initialPlan={plan}
         isAiConfigured={isAiConfigured}
         brands={brands}
+      />
+
+      {/* AIVA Voice Workspace */}
+      <VoiceWorkspace
+        projectId={id}
+        hasDirectorPlan={Boolean(plan)}
+        directorScriptHash={plan?.scriptHash}
+        initialVoiceTrack={voiceTrack}
+        isConfigured={isVoiceConfigured}
+        defaultVoice={voiceProvider.defaultVoice}
+        supportedVoices={Object.values(VOICE_PROFILES)}
       />
     </div>
   );
