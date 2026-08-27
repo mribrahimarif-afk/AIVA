@@ -7,6 +7,8 @@ import { createSceneRepository } from "@/repositories/scene.repository";
 import { createDirectorPlanRepository } from "@/repositories/director-plan.repository";
 import { createAssetRepository } from "@/repositories/asset.repository";
 import { GeminiDirectorProvider } from "@/providers/ai/gemini-director.provider";
+import { OpenRouterDirectorProvider } from "@/providers/ai/openrouter-director.provider";
+import { ResilientDirectorProvider } from "@/providers/ai/resilient-director.provider";
 import { getEnv } from "@/infrastructure/config/env";
 import { logger } from "@/infrastructure/logging/logger";
 import { createProjectService } from "./project.service";
@@ -36,11 +38,24 @@ export const repositories = {
 };
 
 const env = getEnv();
-export const directorAiProvider = new GeminiDirectorProvider({
+export const geminiDirectorProvider = new GeminiDirectorProvider({
   apiKey: env.GEMINI_API_KEY,
   model: env.GEMINI_MODEL,
   fallbackModel: env.GEMINI_DIRECTOR_FALLBACK_MODEL,
   timeoutMs: env.GEMINI_TIMEOUT_MS,
+  logger,
+});
+
+export const openRouterDirectorProvider = new OpenRouterDirectorProvider({
+  apiKey: env.OPENROUTER_API_KEY,
+  model: env.OPENROUTER_DIRECTOR_MODEL,
+  timeoutMs: env.OPENROUTER_TIMEOUT_MS,
+  logger,
+});
+
+export const directorAiProvider = new ResilientDirectorProvider({
+  geminiProvider: geminiDirectorProvider,
+  openRouterProvider: openRouterDirectorProvider,
   logger,
 });
 
