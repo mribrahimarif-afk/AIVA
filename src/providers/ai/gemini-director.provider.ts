@@ -171,6 +171,27 @@ function sanitizeFinishReason(reason: unknown): string {
   return "OTHER";
 }
 
+const ALLOWED_DETAIL_CODES = new Set([
+  "AUTH_FAILURE",
+  "RATE_LIMITED",
+  "TIMEOUT",
+  "UPSTREAM_UNAVAILABLE",
+  "NETWORK_FAILURE",
+  "MALFORMED_JSON",
+  "SCHEMA_VALIDATION_FAILED",
+  "SAFETY_BLOCKED",
+  "GENERATION_TERMINATED",
+  "EMPTY_RESPONSE",
+  "REQUEST_FAILED",
+] as const);
+
+function sanitizeDetailCode(code: unknown): string {
+  if (typeof code === "string" && ALLOWED_DETAIL_CODES.has(code as never)) {
+    return code;
+  }
+  return "REQUEST_FAILED";
+}
+
 export class GeminiDirectorProvider implements DirectorAiProvider {
   readonly id = "gemini-director";
   readonly modelName: string;
@@ -444,8 +465,8 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
 
   private normalizeError(err: unknown): ProviderError {
     if (err instanceof ProviderError) {
-      // Re-construct cleanly to ensure details contains only strictly safe allowlisted keys
-      const safeCode = (err.details?.code as string) || "REQUEST_FAILED";
+      // Re-construct cleanly to ensure details contains only strictly safe allowlisted keys and codes
+      const safeCode = sanitizeDetailCode(err.details?.code);
       const safeDetails: Record<string, unknown> = { code: safeCode };
       if (
         typeof err.details?.timeoutMs === "number" &&
