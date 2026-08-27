@@ -516,4 +516,29 @@ describe("DirectorService Integration & Atomicity Tests", () => {
     });
     expect(persistedScenes).toHaveLength(updatedPlan.scenes.length);
   });
+
+  it("persists and reports the actual fallback model when provider executes failover", async () => {
+    const script = "Simple script testing fallback model persistence.";
+    const project = await projectRepo.create({
+      name: "Fallback Model Test",
+      script,
+      aspectRatio: "9:16",
+    });
+
+    // Configure fake provider to return fallback model
+    fakeAiProvider.customAnalyze = async (input) => {
+      const defaultPlan = fakeAiProvider.generateDefaultValidPlan(input);
+      return {
+        ...defaultPlan,
+        model: "gemini-2.5-flash",
+      };
+    };
+
+    const plan = await service.analyzeAndPlan(project.id, { script });
+    expect(plan.model).toBe("gemini-2.5-flash");
+
+    // Verify DB persisted record
+    const retrieved = await service.getPlan(project.id);
+    expect(retrieved?.model).toBe("gemini-2.5-flash");
+  });
 });

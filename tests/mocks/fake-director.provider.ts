@@ -8,6 +8,7 @@ import type { RawDirectorOutput, RawDirectorScene } from "@/domain/director";
 export class FakeDirectorProvider implements DirectorAiProvider {
   readonly id = "fake-director";
   readonly modelName = "gemini-3.7-flash-mock";
+  readonly fallbackModelName = "gemini-2.5-flash-mock";
   public configured = true;
   public analyzeCallCount = 0;
   public repairCallCount = 0;
@@ -139,6 +140,7 @@ export class FakeDirectorProvider implements DirectorAiProvider {
       summary: `Engaging commercial featuring ${input.productContext?.name || "the product"}.`,
       creativeDirection: "Sleek modern commercial with fast-paced visual storytelling.",
       scenes,
+      model: this.modelName,
     };
   }
 }

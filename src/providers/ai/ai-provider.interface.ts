@@ -27,6 +27,7 @@ export interface DirectorRepairInput extends DirectorPromptInput {
 export interface DirectorAiProvider {
   readonly id: string;
   readonly modelName: string;
+  readonly fallbackModelName?: string;
   isConfigured(): boolean;
   analyze(input: DirectorPromptInput): Promise<RawDirectorOutput>;
   repair(input: DirectorRepairInput): Promise<RawDirectorOutput>;

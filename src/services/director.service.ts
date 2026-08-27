@@ -188,6 +188,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
       }
 
       const validatedScenes: DirectorScene[] = validation.scenes;
+      const actualModel = finalRawOutput.model || directorAiProvider.modelName;
 
       // 10. Atomically replace DirectorPlan and DirectorScenes in database
       const savedPlan = await directorPlanRepository.replacePlan(
@@ -199,7 +200,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
           unitizerVersion: UNITIZER_VERSION,
           schemaVersion: DIRECTOR_SCHEMA_VERSION,
           promptVersion: DIRECTOR_PROMPT_VERSION,
-          model: directorAiProvider.modelName,
+          model: actualModel,
           language: finalRawOutput.language,
           contentType: finalRawOutput.contentType,
           summary: finalRawOutput.summary,
@@ -233,7 +234,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         projectId,
         scriptCharCount: script.length,
         scriptHash,
-        model: directorAiProvider.modelName,
+        model: actualModel,
         promptVersion: DIRECTOR_PROMPT_VERSION,
         sceneCount: savedPlan.scenes.length,
         latencyMs,

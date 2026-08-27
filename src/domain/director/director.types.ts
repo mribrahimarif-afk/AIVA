@@ -100,6 +100,7 @@ export interface RawDirectorOutput {
   summary: string;
   creativeDirection: string;
   scenes: RawDirectorScene[];
+  model?: string;
 }
 
 /**

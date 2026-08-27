@@ -15,12 +15,15 @@ import type {
   DirectorPromptInput,
   DirectorRepairInput,
 } from "./ai-provider.interface";
+import type { Logger } from "@/infrastructure/logging/logger";
 
 export interface GeminiDirectorProviderOptions {
   apiKey?: string;
   model?: string;
+  fallbackModel?: string;
   timeoutMs?: number;
   maxRetries?: number;
+  logger?: Logger;
 }
 
 const DIRECTOR_JSON_SCHEMA = {
@@ -195,14 +198,18 @@ function sanitizeDetailCode(code: unknown): string {
 export class GeminiDirectorProvider implements DirectorAiProvider {
   readonly id = "gemini-director";
   readonly modelName: string;
+  readonly fallbackModelName: string;
   private readonly apiKey: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly logger?: Logger;
   private client: GoogleGenAI | null = null;
 
   constructor(options: GeminiDirectorProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || "";
     this.modelName = options.model?.trim() || "gemini-3.7-flash";
+    this.fallbackModelName = options.fallbackModel?.trim() || "gemini-2.5-flash";
+    this.logger = options.logger;
     this.timeoutMs =
       typeof options.timeoutMs === "number" &&
       Number.isFinite(options.timeoutMs) &&
@@ -210,7 +217,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         ? Math.min(Math.floor(options.timeoutMs), 300000)
         : 45000;
 
-    // Hard-bounded maxRetries: strictly finite integer within [0, 2] (max 3 total attempts)
+    // Hard-bounded maxRetries: strictly finite integer within [0, 2]
     let retries = 2;
     if (typeof options.maxRetries === "number" && Number.isFinite(options.maxRetries)) {
       const floored = Math.floor(options.maxRetries);
@@ -231,14 +238,14 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     this.assertConfigured();
 
     const userPrompt = this.buildAnalysisPrompt(input);
-    return this.executeWithRetry(userPrompt);
+    return this.executeWithRetryAndFallback(userPrompt);
   }
 
   async repair(input: DirectorRepairInput): Promise<RawDirectorOutput> {
     this.assertConfigured();
 
     const repairPrompt = this.buildRepairPrompt(input);
-    return this.executeWithRetry(repairPrompt);
+    return this.executeWithRetryAndFallback(repairPrompt);
   }
 
   private assertConfigured(): void {
@@ -312,29 +319,108 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     return lines.join("\n");
   }
 
-  private async executeWithRetry(prompt: string): Promise<RawDirectorOutput> {
-    let lastError: unknown;
+  private async executeWithRetryAndFallback(prompt: string): Promise<RawDirectorOutput> {
+    const startTime = Date.now();
+    let primaryAttempts = 0;
+    let primaryLastError: unknown = null;
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    // --- Phase 1: Primary Model (this.modelName, e.g. gemini-3.7-flash) ---
+    const primaryMaxAttempts = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
+
+    for (let attempt = 0; attempt < primaryMaxAttempts; attempt++) {
+      primaryAttempts++;
       try {
-        return await this.callGeminiApi(prompt);
+        const result = await this.callGeminiApi(prompt, this.modelName);
+        return {
+          ...result,
+          model: this.modelName,
+        };
       } catch (err: unknown) {
-        lastError = err;
+        primaryLastError = err;
 
-        if (this.isNonRetryableError(err) || attempt === this.maxRetries) {
+        // Fatal non-retryable errors fail immediately without fallback
+        if (this.isNonRetryableError(err)) {
+          throw this.normalizeError(err);
+        }
+
+        // On full primary timeout, do not burn another 45 seconds on primary; fail over promptly
+        if (this.isTimeoutError(err)) {
           break;
         }
 
-        // Exponential backoff with jitter: 500ms, 1500ms
-        const delayMs = Math.min(500 * Math.pow(2.5, attempt) + Math.random() * 100, 4000);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        // For retryable upstream errors (503, 502, network failure), retry on primary if attempts remain
+        if (this.isFallbackEligibleError(err)) {
+          if (attempt < primaryMaxAttempts - 1) {
+            const delayMs = Math.min(500 * Math.pow(2, attempt) + Math.random() * 50, 2000);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+          }
+          break;
+        }
+
+        throw this.normalizeError(err);
       }
     }
 
-    throw this.normalizeError(lastError);
+    // --- Phase 2: Fallback Model (this.fallbackModelName, e.g. gemini-2.5-flash) ---
+    const canFallback =
+      this.fallbackModelName &&
+      this.fallbackModelName !== this.modelName &&
+      this.isFallbackEligibleError(primaryLastError);
+
+    if (canFallback) {
+      const safeReasonCode = this.extractSafeReasonCode(primaryLastError);
+      const elapsedMs = Date.now() - startTime;
+
+      if (this.logger) {
+        this.logger.warn({
+          event: "director.provider_fallback",
+          fromModel: this.modelName,
+          toModel: this.fallbackModelName,
+          reason: safeReasonCode,
+          primaryAttempts,
+          elapsedMs,
+        });
+      }
+
+      const fallbackMaxAttempts = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
+      let fallbackLastError: unknown = null;
+
+      for (let attempt = 0; attempt < fallbackMaxAttempts; attempt++) {
+        try {
+          const result = await this.callGeminiApi(prompt, this.fallbackModelName);
+          return {
+            ...result,
+            model: this.fallbackModelName,
+          };
+        } catch (err: unknown) {
+          fallbackLastError = err;
+
+          if (this.isNonRetryableError(err)) {
+            throw this.normalizeError(err);
+          }
+
+          if (this.isTimeoutError(err)) {
+            break;
+          }
+
+          if (this.isFallbackEligibleError(err) && attempt < fallbackMaxAttempts - 1) {
+            const delayMs = Math.min(500 * Math.pow(2, attempt) + Math.random() * 50, 2000);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+          }
+
+          break;
+        }
+      }
+
+      throw this.normalizeError(fallbackLastError || primaryLastError);
+    }
+
+    throw this.normalizeError(primaryLastError);
   }
 
-  private async callGeminiApi(prompt: string): Promise<RawDirectorOutput> {
+  private async callGeminiApi(prompt: string, model: string): Promise<RawDirectorOutput> {
     if (!this.client) {
       throw new ProviderError(this.id, "Gemini client is uninitialized", {
         code: "AUTH_FAILURE",
@@ -355,7 +441,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     });
 
     const sdkCallPromise = this.client.models.generateContent({
-      model: this.modelName,
+      model,
       contents: prompt,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -409,7 +495,10 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         });
       }
 
-      return validated.data;
+      return {
+        ...validated.data,
+        model,
+      };
     } finally {
       if (timerId) {
         clearTimeout(timerId);
@@ -418,11 +507,101 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     }
   }
 
+  private isTimeoutError(err: unknown): boolean {
+    if (err instanceof ProviderError) {
+      return err.details?.code === "TIMEOUT";
+    }
+    if (err instanceof Error) {
+      const msg = err.message.toLowerCase();
+      return msg.includes("timeout") || msg.includes("etimedout") || err.name === "AbortError";
+    }
+    return false;
+  }
+
+  private isFallbackEligibleError(err: unknown): boolean {
+    if (this.isNonRetryableError(err)) {
+      return false;
+    }
+    if (this.isTimeoutError(err)) {
+      return true;
+    }
+    if (err instanceof ProviderError) {
+      const code = err.details?.code;
+      return code === "UPSTREAM_UNAVAILABLE" || code === "NETWORK_FAILURE";
+    }
+    if (err instanceof Error) {
+      const message = err.message.toLowerCase();
+      // Upstream 5xx / Service Unavailable
+      if (
+        message.includes("500") ||
+        message.includes("502") ||
+        message.includes("503") ||
+        message.includes("504") ||
+        message.includes("unavailable") ||
+        message.includes("bad gateway") ||
+        message.includes("service unavailable") ||
+        message.includes("overloaded") ||
+        message.includes("internal server error")
+      ) {
+        return true;
+      }
+      // Transient Network Failures
+      if (
+        message.includes("econnreset") ||
+        message.includes("econnrefused") ||
+        message.includes("enotfound") ||
+        message.includes("fetch failed") ||
+        message.includes("network error") ||
+        message.includes("socket hang up")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private extractSafeReasonCode(err: unknown): string {
+    if (err instanceof ProviderError && typeof err.details?.code === "string") {
+      return sanitizeDetailCode(err.details.code);
+    }
+    if (this.isTimeoutError(err)) {
+      return "TIMEOUT";
+    }
+    if (err instanceof Error) {
+      const message = err.message.toLowerCase();
+      if (
+        message.includes("500") ||
+        message.includes("502") ||
+        message.includes("503") ||
+        message.includes("504") ||
+        message.includes("unavailable") ||
+        message.includes("bad gateway") ||
+        message.includes("service unavailable") ||
+        message.includes("overloaded") ||
+        message.includes("internal server error")
+      ) {
+        return "UPSTREAM_UNAVAILABLE";
+      }
+      if (
+        message.includes("econnreset") ||
+        message.includes("econnrefused") ||
+        message.includes("enotfound") ||
+        message.includes("fetch failed") ||
+        message.includes("network error") ||
+        message.includes("socket hang up")
+      ) {
+        return "NETWORK_FAILURE";
+      }
+    }
+    return "REQUEST_FAILED";
+  }
+
   private isNonRetryableError(err: unknown): boolean {
     if (err instanceof ProviderError) {
       const code = err.details?.code;
       if (
         code === "AUTH_FAILURE" ||
+        code === "RATE_LIMITED" ||
         code === "SCHEMA_VALIDATION_FAILED" ||
         code === "MALFORMED_JSON" ||
         code === "GENERATION_TERMINATED" ||
@@ -446,6 +625,15 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         message.includes("invalid api key") ||
         message.includes("401") ||
         message.includes("403")
+      ) {
+        return true;
+      }
+      // Rate limit errors are non-retryable for fallback (account/quota)
+      if (
+        message.includes("429") ||
+        message.includes("quota") ||
+        message.includes("rate limit") ||
+        message.includes("resource_exhausted")
       ) {
         return true;
       }
