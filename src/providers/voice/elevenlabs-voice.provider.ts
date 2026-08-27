@@ -1,16 +1,23 @@
-import { getEnv } from "@/infrastructure/config/env";
 import { logger } from "@/infrastructure/logging/logger";
+import { getEnv } from "@/infrastructure/config/env";
 import { ProviderError } from "@/domain/errors";
 import {
   VoiceProfile,
   VoiceSynthesisResult,
   VOICE_OUTPUT_FORMAT,
-  pcm24kToWav,
-  computePcm24kDurationTicks,
+} from "@/domain/voice/voice.types";
+import { pcm24kToWav, computePcm24kDurationTicks } from "@/domain/voice/pcm-to-wav";
+import {
   convertElevenLabsAlignmentToBoundaries,
   ElevenLabsAlignment,
-} from "@/domain/voice";
+} from "@/domain/voice/elevenlabs-alignment";
 import { VoiceProvider, VoiceSynthesisOptions } from "./voice-provider.interface";
+
+export const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_v3";
+export const DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel (Multilingual)
+export const ELEVENLABS_MAX_CHARS_V3 = 5000;
+export const ELEVENLABS_DISCOVERY_MAX_PAGES = 5;
+export const ELEVENLABS_DISCOVERY_PAGE_SIZE = 100;
 
 export interface ElevenLabsVoiceConfig {
   apiKey?: string;
@@ -20,10 +27,6 @@ export interface ElevenLabsVoiceConfig {
   fetchFn?: typeof fetch;
 }
 
-const DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel - Multilingual
-const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_v3";
-export const ELEVENLABS_MAX_CHARS_V3 = 5000;
-
 export function validateElevenLabsTimeoutMs(val: unknown): number {
   if (
     typeof val !== "number" ||
@@ -32,17 +35,28 @@ export function validateElevenLabsTimeoutMs(val: unknown): number {
     val < 5000 ||
     val > 300000
   ) {
-    throw new ProviderError("elevenlabs", "Invalid synthesis timeout configuration", {
-      code: "REQUEST_FAILED",
-    });
+    return 45000;
   }
   return val;
+}
+
+interface ElevenLabsV2VoicesResponse {
+  voices?: Array<{
+    voice_id: string;
+    name: string;
+    labels?: Record<string, string>;
+    description?: string;
+    preview_url?: string;
+  }>;
+  has_more?: boolean;
+  next_page_token?: string | null;
 }
 
 export class ElevenLabsVoiceProvider implements VoiceProvider {
   readonly id = "elevenlabs";
   readonly defaultVoice: string;
   readonly defaultModel: string;
+
   private readonly apiKey: string;
   private readonly timeoutMs: number;
   private readonly fetchFn: typeof fetch;
@@ -68,45 +82,104 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
       return this.getFallbackVoices();
     }
 
+    const voiceMap = new Map<string, VoiceProfile>();
+
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
+      let pageToken: string | undefined = undefined;
+      let pageCount = 0;
 
-      const response = await this.fetchFn("https://api.elevenlabs.io/v1/voices", {
-        method: "GET",
-        headers: {
-          "xi-api-key": this.apiKey,
-        },
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer));
+      while (pageCount < ELEVENLABS_DISCOVERY_MAX_PAGES) {
+        pageCount++;
 
-      if (!response.ok) {
-        logger.warn({
-          event: "elevenlabs.list_voices_failed",
-          status: response.status,
-        });
+        const url = new URL("https://api.elevenlabs.io/v2/voices");
+        url.searchParams.set("page_size", String(ELEVENLABS_DISCOVERY_PAGE_SIZE));
+        if (pageToken) {
+          url.searchParams.set("next_page_token", pageToken);
+        }
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+
+        let response: Response;
+        try {
+          response = await this.fetchFn(url.toString(), {
+            method: "GET",
+            headers: {
+              "xi-api-key": this.apiKey,
+            },
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (!response.ok) {
+          logger.warn({
+            event: "elevenlabs.list_voices_failed",
+            status: response.status,
+            page: pageCount,
+          });
+          break;
+        }
+
+        let rawData: unknown;
+        try {
+          rawData = await response.json();
+        } catch {
+          break;
+        }
+
+        const data = rawData as ElevenLabsV2VoicesResponse;
+        if (!data || !Array.isArray(data.voices)) {
+          break;
+        }
+
+        for (const v of data.voices) {
+          if (!v || typeof v.voice_id !== "string" || v.voice_id.trim().length === 0) {
+            continue;
+          }
+
+          const stableId = v.voice_id.trim();
+          if (voiceMap.has(stableId)) {
+            continue; // Deduplicate by stable voice_id
+          }
+
+          const genderLabel = (v.labels?.gender || "").toLowerCase();
+          const gender = genderLabel.includes("female")
+            ? "Female"
+            : genderLabel.includes("male")
+            ? "Male"
+            : "Neutral";
+
+          voiceMap.set(stableId, {
+            name: stableId,
+            displayName: v.name || stableId,
+            language: v.labels?.language || "Multilingual",
+            locale: "multilingual",
+            gender,
+            description: v.labels?.description || v.description || v.labels?.accent || v.name || stableId,
+            provider: "ELEVENLABS",
+            voiceId: stableId,
+          });
+        }
+
+        if (
+          !data.has_more ||
+          !data.next_page_token ||
+          typeof data.next_page_token !== "string" ||
+          data.next_page_token === pageToken
+        ) {
+          break;
+        }
+
+        pageToken = data.next_page_token;
+      }
+
+      if (voiceMap.size === 0) {
         return this.getFallbackVoices();
       }
 
-      const data = (await response.json()) as { voices?: Array<{ voice_id: string; name: string; labels?: Record<string, string> }> };
-      if (!data || !Array.isArray(data.voices)) {
-        return this.getFallbackVoices();
-      }
-
-      return data.voices.map((v) => {
-        const genderLabel = (v.labels?.gender || "").toLowerCase();
-        const gender = genderLabel.includes("female") ? "Female" : genderLabel.includes("male") ? "Male" : "Neutral";
-        return {
-          name: v.voice_id,
-          displayName: v.name,
-          language: v.labels?.language || "Multilingual",
-          locale: "multilingual",
-          gender,
-          description: v.labels?.description || v.labels?.accent || v.name,
-          provider: "ELEVENLABS",
-          voiceId: v.voice_id,
-        };
-      });
+      return Array.from(voiceMap.values());
     } catch (err: unknown) {
       logger.warn({
         event: "elevenlabs.list_voices_error",
