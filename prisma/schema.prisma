@@ -38,8 +38,59 @@ model Brand {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  products Product[]
+  assets   Asset[]
+
   @@index([name])
   @@map("brands")
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  brandId     String
+  name        String
+  slug        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  brand   Brand          @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  aliases ProductAlias[]
+  assets  Asset[]
+
+  @@unique([brandId, slug])
+  @@index([brandId])
+  @@index([name])
+  @@map("products")
+}
+
+model ProductAlias {
+  id              String   @id @default(cuid())
+  productId       String
+  alias           String
+  normalizedAlias String
+  createdAt       DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, normalizedAlias])
+  @@index([productId])
+  @@index([normalizedAlias])
+  @@map("product_aliases")
+}
+
+model ContentBlob {
+  id          String   @id @default(cuid())
+  checksum    String   @unique
+  storagePath String
+  sizeBytes   Int
+  mimeType    String
+  createdAt   DateTime @default(now())
+
+  assets Asset[]
+
+  @@index([checksum])
+  @@map("content_blobs")
 }
 
 model Scene {
@@ -60,17 +111,37 @@ model Scene {
 }
 
 model Asset {
-  id        String   @id @default(cuid())
-  type      String
-  source    String
-  localPath String?
-  metadata  String?
-  createdAt DateTime @default(now())
+  id               String   @id @default(cuid())
+  title            String?
+  originalFilename String?
+  type             String
+  vaultRole        String?
+  source           String
+  localPath        String?
+  mimeType         String?
+  sizeBytes        Int?
+  checksum         String?
+  metadata         String?
+  createdAt        DateTime @default(now())
 
   projectId String?
   project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
+  brandId String?
+  brand   Brand?   @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  blobId String?
+  blob   ContentBlob? @relation(fields: [blobId], references: [id], onDelete: SetNull)
+
   @@index([projectId])
+  @@index([brandId])
+  @@index([productId])
+  @@index([blobId])
+  @@index([vaultRole])
+  @@index([checksum])
   @@index([type])
   @@index([source])
   @@map("assets")

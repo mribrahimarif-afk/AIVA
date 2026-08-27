@@ -24,11 +24,20 @@ const baseSceneRow = {
 
 const baseAssetRow = {
   id: "asset_1",
+  title: null,
+  originalFilename: null,
   type: "SOURCE",
+  vaultRole: null,
   source: "LOCAL_UPLOAD",
   localPath: null,
+  mimeType: null,
+  sizeBytes: null,
+  checksum: null,
   metadata: null,
   projectId: null,
+  brandId: null,
+  productId: null,
+  blobId: null,
   createdAt: new Date(),
 };
 
@@ -83,5 +92,9 @@ describe("toAsset", () => {
 
   it("throws DataIntegrityError for a corrupted source value", () => {
     expect(() => toAsset({ ...baseAssetRow, source: "NOT_A_SOURCE" })).toThrow(DataIntegrityError);
+  });
+
+  it("throws DataIntegrityError for corrupt JSON in metadata column", () => {
+    expect(() => toAsset({ ...baseAssetRow, metadata: "{invalid_json:true" })).toThrow(DataIntegrityError);
   });
 });

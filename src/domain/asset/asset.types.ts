@@ -1,6 +1,5 @@
 /**
- * Asset categories, aligned with the per-project storage workspace
- * subdirectories created by the storage service.
+ * Asset categories, aligned with per-project storage workspace.
  */
 export const ASSET_TYPES = [
   "SOURCE",
@@ -16,9 +15,21 @@ export const ASSET_TYPES = [
 export type AssetType = (typeof ASSET_TYPES)[number];
 
 /**
- * Where an asset originated. Provider-backed sources are listed here as
- * future-safe values even though no provider is implemented in TASK-001.
+ * Explicit Vault classification concept representing what role an asset plays
+ * within the permanent AIVA Vault library.
  */
+export const VAULT_ROLES = [
+  "BRAND_LOGO",
+  "PRODUCT_VIDEO",
+  "MUSIC",
+  "SFX",
+  "OUTRO",
+  "FONT",
+  "BROLL",
+] as const;
+
+export type VaultRole = (typeof VAULT_ROLES)[number];
+
 export const ASSET_SOURCES = [
   "LOCAL_UPLOAD",
   "AI_GENERATED",
@@ -30,12 +41,30 @@ export const ASSET_SOURCES = [
 
 export type AssetSource = (typeof ASSET_SOURCES)[number];
 
+export interface ContentBlob {
+  id: string;
+  checksum: string;
+  storagePath: string;
+  sizeBytes: number;
+  mimeType: string;
+  createdAt: Date;
+}
+
 export interface Asset {
   id: string;
+  title: string | null;
+  originalFilename: string | null;
   type: AssetType;
+  vaultRole: VaultRole | null;
   source: AssetSource;
   localPath: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  checksum: string | null;
   metadata: Record<string, unknown> | null;
   projectId: string | null;
+  brandId: string | null;
+  productId: string | null;
+  blobId: string | null;
   createdAt: Date;
 }
