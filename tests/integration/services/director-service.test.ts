@@ -367,7 +367,7 @@ describe("DirectorService Integration & Atomicity Tests", () => {
     expect(planAfterFailure!.originalScript).toBe(validScript);
   });
 
-  it("proves complete aggregate rollback when an error occurs mid-transaction during plan replacement", async () => {
+  it("proves complete aggregate rollback when an error occurs mid-transaction during production replacePlan", async () => {
     const oldScript = "Old original script that must survive rollback.";
     const project = await projectRepo.create({
       name: "Atomicity Rollback Test",
@@ -386,73 +386,72 @@ describe("DirectorService Integration & Atomicity Tests", () => {
     });
     expect(initialScenes.length).toBeGreaterThan(0);
     const initialSceneIds = initialScenes.map((s) => s.id);
-
-    // 2. Instantiate a service using a repository that fails mid-transaction
-    const failingPlanRepo: typeof directorPlanRepo = {
-      ...directorPlanRepo,
-      async replacePlan(projectId, plan) {
-        return prisma.$transaction(async (tx) => {
-          // Update project.script inside the transaction
-          await tx.project.update({
-            where: { id: projectId },
-            data: { script: plan.originalScript },
-          });
-
-          // Upsert directorPlan inside the transaction
-          await tx.directorPlan.upsert({
-            where: { projectId },
-            create: {
-              projectId,
-              originalScript: plan.originalScript,
-              scriptHash: plan.scriptHash,
-              unitizerVersion: plan.unitizerVersion,
-              schemaVersion: plan.schemaVersion,
-              promptVersion: plan.promptVersion,
-              model: plan.model,
-              language: plan.language,
-              contentType: plan.contentType,
-              summary: plan.summary,
-              creativeDirection: plan.creativeDirection,
-              generatedAt: new Date(),
-            },
-            update: {
-              originalScript: plan.originalScript,
-              scriptHash: plan.scriptHash,
-              unitizerVersion: plan.unitizerVersion,
-              schemaVersion: plan.schemaVersion,
-              promptVersion: plan.promptVersion,
-              model: plan.model,
-              language: plan.language,
-              contentType: plan.contentType,
-              summary: plan.summary,
-              creativeDirection: plan.creativeDirection,
-              generatedAt: new Date(),
-            },
-          });
-
-          // Simulate database error during subsequent transaction step
-          throw new Error("Simulated in-transaction database disk failure during scene insertion");
-        });
-      },
-    };
-
-    const failingService = createDirectorService({
-      directorPlanRepository: failingPlanRepo,
-      projectRepository: projectRepo,
-      brandRepository: brandRepo,
-      productRepository: productRepo,
-      directorAiProvider: fakeAiProvider,
-      logger,
-    });
+    const initialGeneratedAt = initialPlan.generatedAt;
 
     const newScript = "New candidate script that should be rolled back completely.";
 
-    // 3. Attempt re-analysis with new script
+    // 2. Call the REAL production directorPlanRepo.replacePlan with duplicate scene orders
+    // to trigger a natural SQLite UNIQUE(directorPlanId, order) constraint failure on createMany
+    // AFTER tx.project.update and tx.directorPlan.upsert have already executed inside the transaction.
+    const duplicateOrderScenes: Parameters<typeof directorPlanRepo.replacePlan>[2] = [
+      {
+        order: 1,
+        text: "Scene 1 narration",
+        unitIds: ["u0001"],
+        purpose: "HOOK",
+        visualBrief: "Scene 1 brief",
+        visualSourceHint: "STOCK",
+        shotType: "PRODUCT_HERO",
+        mood: "Dramatic",
+        setting: "Studio",
+        subject: "Product",
+        productPresence: "PREFERRED",
+        searchQuery: "product hero",
+        keywords: ["product"],
+        manualAiPrompt: null,
+        sourceSpanStart: 0,
+        sourceSpanEnd: 10,
+      },
+      {
+        order: 1, // Duplicate order causes natural UNIQUE(directorPlanId, order) collision in DB
+        text: "Scene 2 duplicate order narration",
+        unitIds: ["u0002"],
+        purpose: "PROBLEM",
+        visualBrief: "Scene 2 brief",
+        visualSourceHint: "STOCK",
+        shotType: "PRODUCT_DETAIL",
+        mood: "Dramatic",
+        setting: "Studio",
+        subject: "Product",
+        productPresence: "PREFERRED",
+        searchQuery: "product closeup",
+        keywords: ["product"],
+        manualAiPrompt: null,
+        sourceSpanStart: 11,
+        sourceSpanEnd: 20,
+      },
+    ];
+
+    // 3. Attempt replacePlan with duplicate order scenes
     await expect(
-      failingService.analyzeAndPlan(project.id, {
-        script: newScript,
-      })
-    ).rejects.toThrow("Simulated in-transaction database disk failure");
+      directorPlanRepo.replacePlan(
+        project.id,
+        {
+          projectId: project.id,
+          originalScript: newScript,
+          scriptHash: "new-hash-12345",
+          unitizerVersion: "1.0.0",
+          schemaVersion: "1.0.0",
+          promptVersion: "1.0.0",
+          model: "gemini-3.7-flash",
+          language: "ENGLISH",
+          contentType: "ADVERTISEMENT",
+          summary: "New summary that should be rolled back",
+          creativeDirection: "New direction that should be rolled back",
+        },
+        duplicateOrderScenes
+      )
+    ).rejects.toThrow();
 
     // 4. Reload all database state and assert 100% rollback of the aggregate
     const reloadedProject = await projectRepo.findById(project.id);
@@ -463,10 +462,12 @@ describe("DirectorService Integration & Atomicity Tests", () => {
       where: { projectId: project.id },
     });
     expect(reloadedPlan).not.toBeNull();
+    expect(reloadedPlan!.id).toBe(initialPlan.id);
     expect(reloadedPlan!.originalScript).toBe(oldScript);
     expect(reloadedPlan!.scriptHash).toBe(initialPlan.scriptHash);
     expect(reloadedPlan!.summary).toBe(initialPlan.summary);
     expect(reloadedPlan!.creativeDirection).toBe(initialPlan.creativeDirection);
+    expect(reloadedPlan!.generatedAt.getTime()).toBe(initialGeneratedAt.getTime());
 
     const reloadedScenes = await prisma.directorScene.findMany({
       where: { directorPlanId: initialPlan.id },

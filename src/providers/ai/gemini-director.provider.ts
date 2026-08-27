@@ -152,6 +152,25 @@ CRITICAL SECURITY AND FIDELITY RULES:
 6. OUTPUT FORMAT:
    - Respond ONLY with valid JSON conforming to the structured schema. Do NOT include markdown code blocks or surrounding text.`;
 
+const ALLOWED_FINISH_REASONS = new Set([
+  "STOP",
+  "MAX_TOKENS",
+  "SAFETY",
+  "RECITATION",
+  "OTHER",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "MALFORMED_FUNCTION_CALL",
+]);
+
+function sanitizeFinishReason(reason: unknown): string {
+  if (typeof reason === "string" && ALLOWED_FINISH_REASONS.has(reason)) {
+    return reason;
+  }
+  return "OTHER";
+}
+
 export class GeminiDirectorProvider implements DirectorAiProvider {
   readonly id = "gemini-director";
   readonly modelName: string;
@@ -163,7 +182,12 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
   constructor(options: GeminiDirectorProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || "";
     this.modelName = options.model?.trim() || "gemini-3.7-flash";
-    this.timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : 45000;
+    this.timeoutMs =
+      typeof options.timeoutMs === "number" &&
+      Number.isFinite(options.timeoutMs) &&
+      options.timeoutMs > 0
+        ? Math.min(Math.floor(options.timeoutMs), 300000)
+        : 45000;
 
     // Hard-bounded maxRetries: strictly finite integer within [0, 2] (max 3 total attempts)
     let retries = 2;
@@ -332,14 +356,14 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         const finishReason = candidate?.finishReason;
         if (finishReason === "SAFETY") {
           throw new ProviderError(this.id, "Gemini generation blocked by safety filters", {
-            finishReason: "SAFETY",
             code: "SAFETY_BLOCKED",
+            finishReason: "SAFETY",
           });
         }
         if (finishReason && finishReason !== "STOP") {
           throw new ProviderError(this.id, "Gemini generation terminated unexpectedly", {
-            finishReason: String(finishReason),
             code: "GENERATION_TERMINATED",
+            finishReason: sanitizeFinishReason(finishReason),
           });
         }
         throw new ProviderError(this.id, "Gemini returned an empty response", {
@@ -358,12 +382,9 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
 
       const validated = rawDirectorOutputSchema.safeParse(parsedJson);
       if (!validated.success) {
-        const errorMessages = validated.error.issues.map(
-          (i) => `${i.path.join(".") || "root"}: ${i.message}`
-        );
+        // Safe by construction: never copy raw Zod messages or model-received values into diagnostics
         throw new ProviderError(this.id, "Gemini structured output failed schema validation", {
           code: "SCHEMA_VALIDATION_FAILED",
-          schemaIssues: errorMessages,
         });
       }
 
@@ -423,17 +444,18 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
 
   private normalizeError(err: unknown): ProviderError {
     if (err instanceof ProviderError) {
-      // Re-construct cleanly to ensure details contains only safe allowlisted keys
+      // Re-construct cleanly to ensure details contains only strictly safe allowlisted keys
       const safeCode = (err.details?.code as string) || "REQUEST_FAILED";
       const safeDetails: Record<string, unknown> = { code: safeCode };
-      if (typeof err.details?.timeoutMs === "number") {
-        safeDetails.timeoutMs = err.details.timeoutMs;
+      if (
+        typeof err.details?.timeoutMs === "number" &&
+        Number.isFinite(err.details.timeoutMs) &&
+        err.details.timeoutMs > 0
+      ) {
+        safeDetails.timeoutMs = Math.min(Math.floor(err.details.timeoutMs), 300000);
       }
       if (typeof err.details?.finishReason === "string") {
-        safeDetails.finishReason = err.details.finishReason;
-      }
-      if (Array.isArray(err.details?.schemaIssues)) {
-        safeDetails.schemaIssues = (err.details.schemaIssues as string[]).map((s) => String(s).slice(0, 200));
+        safeDetails.finishReason = sanitizeFinishReason(err.details.finishReason);
       }
       return new ProviderError(this.id, err.message, safeDetails);
     }
