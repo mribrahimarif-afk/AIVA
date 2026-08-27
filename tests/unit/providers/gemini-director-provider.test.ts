@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { GeminiDirectorProvider } from "@/providers/ai/gemini-director.provider";
+import { DirectorExecutionBudget } from "@/providers/ai/ai-provider.interface";
 import { ProviderError } from "@/domain/errors";
 import { unitizeScript } from "@/domain/director/unitizer";
 import { toErrorResponse } from "@/infrastructure/http/error-response";
@@ -783,5 +784,484 @@ describe("GeminiDirectorProvider Unit & Error Handling Tests", () => {
         expect(callCount).toBeLessThanOrEqual(4);
       });
     }
+  });
+
+  describe("Request-Scoped Transport Budget & Global Call Bound Tests", () => {
+    it("1. GLOBAL ANALYZE + REPAIR CALL BOUND: enforces absolute max 4 Gemini calls across analyze + repair, proving no 5th call occurs", async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: "test-configured-key",
+        model: "gemini-3.7-flash",
+        fallbackModel: "gemini-2.5-flash",
+        timeoutMs: 5000,
+        maxRetries: 2,
+      });
+
+      const budget = new DirectorExecutionBudget();
+      let callCount = 0;
+      const calledModels: string[] = [];
+
+      (provider as unknown as { client: { models: { generateContent: (args: { model: string }) => Promise<unknown> } } }).client = {
+        models: {
+          generateContent: async ({ model }) => {
+            callCount++;
+            calledModels.push(model);
+
+            if (callCount === 1) {
+              // Analyze call 1 (primary): transient 503
+              throw new Error("503 Service Unavailable");
+            }
+            if (callCount === 2) {
+              // Analyze call 2 (primary): transient 503
+              throw new Error("503 Service Unavailable");
+            }
+            if (callCount === 3) {
+              // Analyze call 3 (fallback): returns valid JSON but scene structure that will need repair
+              return {
+                text: JSON.stringify({
+                  language: "ENGLISH",
+                  contentType: "ADVERTISEMENT",
+                  summary: "Summary text",
+                  creativeDirection: "Direction text",
+                  scenes: [
+                    {
+                      order: 1,
+                      unitIds: ["u0001"], // missing u0002 to trigger invariant repair
+                      purpose: "HOOK",
+                      visualBrief: "Visual brief hook",
+                      visualSourceHint: "STOCK",
+                      shotType: "LIFESTYLE",
+                      mood: "Energetic",
+                      setting: "Beach",
+                      subject: "Speaker",
+                      productPresence: "PREFERRED",
+                      searchQuery: "beach speaker",
+                      keywords: ["beach", "speaker"],
+                      manualAiPrompt: null,
+                    },
+                  ],
+                }),
+              };
+            }
+            if (callCount === 4) {
+              // Repair call 4 (fallback): transient 503
+              throw new Error("503 Service Unavailable");
+            }
+            // If call 5 were attempted:
+            throw new Error("ILLEGAL_CALL_5_ATTEMPTED");
+          },
+        },
+      };
+
+      // 1. Initial analyze: uses 2 primary calls + 1 fallback call = 3 calls
+      const analyzeOutput = await provider.analyze({ scriptUnits: units, budget });
+      expect(analyzeOutput.model).toBe("gemini-2.5-flash");
+      expect(callCount).toBe(3);
+      expect(budget.totalCallsUsed).toBe(3);
+      expect(budget.primaryAttemptsUsed).toBe(2);
+      expect(budget.fallbackAttemptsUsed).toBe(1);
+
+      // 2. Repair: budget has only 1 fallback call remaining (call #4).
+      await expect(
+        provider.repair({
+          scriptUnits: units,
+          rawOutput: analyzeOutput,
+          validationErrors: ["Unit u0002 is not assigned to any scene"],
+          budget,
+        })
+      ).rejects.toThrow(ProviderError);
+
+      // Absolute proof: exactly 4 calls occurred total, never 5
+      expect(callCount).toBe(4);
+      expect(budget.totalCallsUsed).toBe(4);
+      expect(budget.hasRemainingBudget()).toBe(false);
+      expect(calledModels).toEqual([
+        "gemini-3.7-flash",
+        "gemini-3.7-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash",
+      ]);
+    });
+
+    it("2. REVIEWER'S CONCRETE SEQUENCE: analyze consumes all 4 calls (2 primary + 2 fallback), repair makes ZERO network calls", async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: "test-configured-key",
+        model: "gemini-3.7-flash",
+        fallbackModel: "gemini-2.5-flash",
+        timeoutMs: 5000,
+        maxRetries: 2,
+      });
+
+      const budget = new DirectorExecutionBudget();
+      let networkCallCount = 0;
+
+      (provider as unknown as { client: { models: { generateContent: () => Promise<unknown> } } }).client = {
+        models: {
+          generateContent: async () => {
+            networkCallCount++;
+            if (networkCallCount <= 3) {
+              // 2 primary fails + 1 fallback fail
+              throw new Error("502 Bad Gateway");
+            }
+            // Fallback call 4 succeeds with output
+            return {
+              text: JSON.stringify({
+                language: "ENGLISH",
+                contentType: "ADVERTISEMENT",
+                summary: "Summary text",
+                creativeDirection: "Direction text",
+                scenes: [
+                  {
+                    order: 1,
+                    unitIds: ["u0001"],
+                    purpose: "HOOK",
+                    visualBrief: "Visual brief hook",
+                    visualSourceHint: "STOCK",
+                    shotType: "LIFESTYLE",
+                    mood: "Energetic",
+                    setting: "Beach",
+                    subject: "Speaker",
+                    productPresence: "PREFERRED",
+                    searchQuery: "beach speaker",
+                    keywords: ["beach", "speaker"],
+                    manualAiPrompt: null,
+                  },
+                ],
+              }),
+            };
+          },
+        },
+      };
+
+      // Analyze consumes all 4 calls
+      const rawOutput = await provider.analyze({ scriptUnits: units, budget });
+      expect(networkCallCount).toBe(4);
+      expect(budget.totalCallsUsed).toBe(4);
+      expect(budget.hasRemainingBudget()).toBe(false);
+
+      // Now repair is invoked with the exhausted budget
+      await expect(
+        provider.repair({
+          scriptUnits: units,
+          rawOutput,
+          validationErrors: ["Unit u0002 is missing"],
+          budget,
+        })
+      ).rejects.toThrow(ProviderError);
+
+      // Crucial assertion: zero additional network calls made by repair!
+      expect(networkCallCount).toBe(4);
+    });
+
+    it("3. PARTIALLY-CONSUMED BUDGET: analyze consumes 3 calls, repair executes exactly 1 remaining fallback call", async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: "test-configured-key",
+        model: "gemini-3.7-flash",
+        fallbackModel: "gemini-2.5-flash",
+        timeoutMs: 5000,
+        maxRetries: 2,
+      });
+
+      const budget = new DirectorExecutionBudget();
+      let callCount = 0;
+
+      (provider as unknown as { client: { models: { generateContent: () => Promise<unknown> } } }).client = {
+        models: {
+          generateContent: async () => {
+            callCount++;
+            if (callCount === 1 || callCount === 2) {
+              throw new Error("503 Service Unavailable");
+            }
+            // Valid response on call 3 and call 4
+            return {
+              text: JSON.stringify({
+                language: "ENGLISH",
+                contentType: "ADVERTISEMENT",
+                summary: "Summary text",
+                creativeDirection: "Direction text",
+                scenes: [
+                  {
+                    order: 1,
+                    unitIds: ["u0001", "u0002"],
+                    purpose: "HOOK",
+                    visualBrief: "Visual brief hook",
+                    visualSourceHint: "STOCK",
+                    shotType: "LIFESTYLE",
+                    mood: "Energetic",
+                    setting: "Beach",
+                    subject: "Speaker",
+                    productPresence: "PREFERRED",
+                    searchQuery: "beach speaker",
+                    keywords: ["beach", "speaker"],
+                    manualAiPrompt: null,
+                  },
+                ],
+              }),
+            };
+          },
+        },
+      };
+
+      const raw = await provider.analyze({ scriptUnits: units, budget });
+      expect(callCount).toBe(3);
+
+      const repaired = await provider.repair({
+        scriptUnits: units,
+        rawOutput: raw,
+        validationErrors: ["Some error"],
+        budget,
+      });
+
+      expect(repaired.model).toBe("gemini-2.5-flash");
+      expect(callCount).toBe(4);
+      expect(budget.totalCallsUsed).toBe(4);
+      expect(budget.hasRemainingBudget()).toBe(false);
+    });
+
+    it("4. EARLY ANALYSIS SUCCESS + REPAIR: analyze succeeds on 1st primary call, repair uses remaining primary and fallback budget (max 4 total)", async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: "test-configured-key",
+        model: "gemini-3.7-flash",
+        fallbackModel: "gemini-2.5-flash",
+        timeoutMs: 5000,
+        maxRetries: 2,
+      });
+
+      const budget = new DirectorExecutionBudget();
+      let callCount = 0;
+      const calledModels: string[] = [];
+
+      (provider as unknown as { client: { models: { generateContent: (args: { model: string }) => Promise<unknown> } } }).client = {
+        models: {
+          generateContent: async ({ model }) => {
+            callCount++;
+            calledModels.push(model);
+
+            if (callCount === 1) {
+              // Analyze call 1 (primary) succeeds
+              return {
+                text: JSON.stringify({
+                  language: "ENGLISH",
+                  contentType: "ADVERTISEMENT",
+                  summary: "Summary text",
+                  creativeDirection: "Direction text",
+                  scenes: [
+                    {
+                      order: 1,
+                      unitIds: ["u0001"],
+                      purpose: "HOOK",
+                      visualBrief: "Visual brief hook",
+                      visualSourceHint: "STOCK",
+                      shotType: "LIFESTYLE",
+                      mood: "Energetic",
+                      setting: "Beach",
+                      subject: "Speaker",
+                      productPresence: "PREFERRED",
+                      searchQuery: "beach speaker",
+                      keywords: ["beach", "speaker"],
+                      manualAiPrompt: null,
+                    },
+                  ],
+                }),
+              };
+            }
+
+            if (callCount === 2) {
+              // Repair call 2 (primary attempt 2) fails with 503
+              throw new Error("503 Service Unavailable");
+            }
+
+            if (callCount === 3) {
+              // Repair call 3 (fallback attempt 1) fails with 503
+              throw new Error("503 Service Unavailable");
+            }
+
+            if (callCount === 4) {
+              // Repair call 4 (fallback attempt 2) succeeds
+              return {
+                text: JSON.stringify({
+                  language: "ENGLISH",
+                  contentType: "ADVERTISEMENT",
+                  summary: "Repaired summary",
+                  creativeDirection: "Repaired direction",
+                  scenes: [
+                    {
+                      order: 1,
+                      unitIds: ["u0001", "u0002"],
+                      purpose: "HOOK",
+                      visualBrief: "Visual brief hook",
+                      visualSourceHint: "STOCK",
+                      shotType: "LIFESTYLE",
+                      mood: "Energetic",
+                      setting: "Beach",
+                      subject: "Speaker",
+                      productPresence: "PREFERRED",
+                      searchQuery: "beach speaker",
+                      keywords: ["beach", "speaker"],
+                      manualAiPrompt: null,
+                    },
+                  ],
+                }),
+              };
+            }
+
+            throw new Error("ILLEGAL_CALL_5");
+          },
+        },
+      };
+
+      const analyzeOut = await provider.analyze({ scriptUnits: units, budget });
+      expect(analyzeOut.model).toBe("gemini-3.7-flash");
+      expect(callCount).toBe(1);
+
+      const repairOut = await provider.repair({
+        scriptUnits: units,
+        rawOutput: analyzeOut,
+        validationErrors: ["Unit u0002 is missing"],
+        budget,
+      });
+
+      expect(repairOut.model).toBe("gemini-2.5-flash");
+      expect(callCount).toBe(4);
+      expect(budget.totalCallsUsed).toBe(4);
+      expect(calledModels).toEqual([
+        "gemini-3.7-flash",
+        "gemini-3.7-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash",
+      ]);
+    });
+
+    it("5. COMBINED TIMEOUT PATH: primary timeout consumes budget and switches promptly to fallback across analyze + repair", async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: "test-configured-key",
+        model: "gemini-3.7-flash",
+        fallbackModel: "gemini-2.5-flash",
+        timeoutMs: 5000,
+        maxRetries: 2,
+      });
+
+      const budget = new DirectorExecutionBudget();
+      let callCount = 0;
+      const calledModels: string[] = [];
+
+      (provider as unknown as { client: { models: { generateContent: (args: { model: string }) => Promise<unknown> } } }).client = {
+        models: {
+          generateContent: async ({ model }) => {
+            callCount++;
+            calledModels.push(model);
+
+            if (callCount === 1) {
+              // Analyze call 1 (primary) hangs, triggering timeout
+              await new Promise((resolve) => setTimeout(resolve, 6000));
+              return {};
+            }
+
+            if (callCount === 2) {
+              // Analyze call 2 (fallback) succeeds
+              return {
+                text: JSON.stringify({
+                  language: "ENGLISH",
+                  contentType: "ADVERTISEMENT",
+                  summary: "Summary text",
+                  creativeDirection: "Direction text",
+                  scenes: [
+                    {
+                      order: 1,
+                      unitIds: ["u0001"],
+                      purpose: "HOOK",
+                      visualBrief: "Visual brief hook",
+                      visualSourceHint: "STOCK",
+                      shotType: "LIFESTYLE",
+                      mood: "Energetic",
+                      setting: "Beach",
+                      subject: "Speaker",
+                      productPresence: "PREFERRED",
+                      searchQuery: "beach speaker",
+                      keywords: ["beach", "speaker"],
+                      manualAiPrompt: null,
+                    },
+                  ],
+                }),
+              };
+            }
+
+            if (callCount === 3) {
+              // Repair call 3: must be fallback model because primary had timed out
+              return {
+                text: JSON.stringify({
+                  language: "ENGLISH",
+                  contentType: "ADVERTISEMENT",
+                  summary: "Repaired summary",
+                  creativeDirection: "Repaired direction",
+                  scenes: [
+                    {
+                      order: 1,
+                      unitIds: ["u0001", "u0002"],
+                      purpose: "HOOK",
+                      visualBrief: "Visual brief hook",
+                      visualSourceHint: "STOCK",
+                      shotType: "LIFESTYLE",
+                      mood: "Energetic",
+                      setting: "Beach",
+                      subject: "Speaker",
+                      productPresence: "PREFERRED",
+                      searchQuery: "beach speaker",
+                      keywords: ["beach", "speaker"],
+                      manualAiPrompt: null,
+                    },
+                  ],
+                }),
+              };
+            }
+
+            throw new Error("ILLEGAL_CALL_4");
+          },
+        },
+      };
+
+      const analyzeOut = await provider.analyze({ scriptUnits: units, budget });
+      expect(analyzeOut.model).toBe("gemini-2.5-flash");
+      expect(callCount).toBe(2);
+      expect(budget.primaryTimeoutEncountered).toBe(true);
+
+      const repairOut = await provider.repair({
+        scriptUnits: units,
+        rawOutput: analyzeOut,
+        validationErrors: ["Unit u0002 is missing"],
+        budget,
+      });
+
+      expect(repairOut.model).toBe("gemini-2.5-flash");
+      expect(callCount).toBe(3);
+      // Verify models called: primary (timed out) -> fallback -> fallback (repair)
+      expect(calledModels).toEqual([
+        "gemini-3.7-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash",
+      ]);
+    });
+
+    it("6. INDEPENDENT REQUEST ISOLATION: multiple requests have completely separate budgets", async () => {
+      const provider = new GeminiDirectorProvider({
+        apiKey: "test-configured-key",
+        model: "gemini-3.7-flash",
+        fallbackModel: "gemini-2.5-flash",
+        timeoutMs: 5000,
+        maxRetries: 2,
+      });
+
+      const budgetA = new DirectorExecutionBudget();
+      const budgetB = new DirectorExecutionBudget();
+
+      budgetA.recordPrimaryCall();
+      budgetA.recordPrimaryCall();
+      budgetA.recordFallbackCall();
+
+      expect(budgetA.totalCallsUsed).toBe(3);
+      expect(budgetB.totalCallsUsed).toBe(0);
+      expect(budgetB.primaryAttemptsUsed).toBe(0);
+      expect(budgetB.fallbackAttemptsUsed).toBe(0);
+      expect(budgetB.hasRemainingBudget()).toBe(true);
+    });
   });
 });

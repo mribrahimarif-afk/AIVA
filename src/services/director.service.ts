@@ -23,6 +23,7 @@ import type {
   BrandContextForDirector,
   ProductContextForDirector,
 } from "@/providers/ai";
+import { createDirectorExecutionBudget } from "@/providers/ai";
 import { Logger } from "@/infrastructure/logging/logger";
 
 export interface DirectorServiceOptions {
@@ -143,11 +144,15 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         );
       }
 
+      // Create request-scoped Gemini transport budget shared across analyze + repair
+      const budget = createDirectorExecutionBudget();
+
       // 7. Initial AI generation
       const rawOutput = await directorAiProvider.analyze({
         scriptUnits,
         brandContext,
         productContext,
+        budget,
       });
 
       // 8. Validate 10 coverage invariants + cross-field rules
@@ -156,11 +161,26 @@ export function createDirectorService(options: DirectorServiceOptions): Director
 
       // 9. Single bounded repair attempt if invalid
       if (!validation.success || !validation.scenes) {
+        // If the transport budget was already exhausted during analysis attempts, fail safely
+        if (!budget.hasRemainingBudget()) {
+          throw new ProviderError(
+            directorAiProvider.id,
+            "Director scene plan failed invariant validation and Gemini transport budget was exhausted before repair could be attempted",
+            {
+              validationErrors: validation.errors,
+              totalCallsUsed: budget.totalCallsUsed,
+              maxTotalCalls: budget.maxTotalCalls,
+            }
+          );
+        }
+
         logger.warn({
           event: "director.validation_repair",
           projectId,
           scriptHash,
           errorCount: validation.errors.length,
+          totalCallsUsed: budget.totalCallsUsed,
+          remainingCalls: budget.maxTotalCalls - budget.totalCallsUsed,
           message: `Director plan failed initial validation with ${validation.errors.length} errors; executing 1 bounded repair attempt`,
         });
 
@@ -170,6 +190,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
           productContext,
           rawOutput,
           validationErrors: validation.errors,
+          budget,
         });
 
         validation = validateAndReconstructPlan(repairedRawOutput, scriptUnits, script);
@@ -237,6 +258,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         model: actualModel,
         promptVersion: DIRECTOR_PROMPT_VERSION,
         sceneCount: savedPlan.scenes.length,
+        totalCallsUsed: budget.totalCallsUsed,
         latencyMs,
       });
 

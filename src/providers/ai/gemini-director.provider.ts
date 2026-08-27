@@ -15,6 +15,7 @@ import type {
   DirectorPromptInput,
   DirectorRepairInput,
 } from "./ai-provider.interface";
+import { DirectorExecutionBudget } from "./ai-provider.interface";
 import type { Logger } from "@/infrastructure/logging/logger";
 
 export interface GeminiDirectorProviderOptions {
@@ -237,15 +238,27 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
   async analyze(input: DirectorPromptInput): Promise<RawDirectorOutput> {
     this.assertConfigured();
 
+    const budget = input.budget ?? this.createDefaultBudget();
     const userPrompt = this.buildAnalysisPrompt(input);
-    return this.executeWithRetryAndFallback(userPrompt);
+    return this.executeWithRetryAndFallback(userPrompt, budget);
   }
 
   async repair(input: DirectorRepairInput): Promise<RawDirectorOutput> {
     this.assertConfigured();
 
+    const budget = input.budget ?? this.createDefaultBudget();
     const repairPrompt = this.buildRepairPrompt(input);
-    return this.executeWithRetryAndFallback(repairPrompt);
+    return this.executeWithRetryAndFallback(repairPrompt, budget);
+  }
+
+  private createDefaultBudget(): DirectorExecutionBudget {
+    const primaryLimit = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
+    const fallbackLimit = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
+    return new DirectorExecutionBudget({
+      maxTotalCalls: primaryLimit + fallbackLimit,
+      maxPrimaryAttempts: primaryLimit,
+      maxFallbackAttempts: fallbackLimit,
+    });
   }
 
   private assertConfigured(): void {
@@ -319,16 +332,32 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     return lines.join("\n");
   }
 
-  private async executeWithRetryAndFallback(prompt: string): Promise<RawDirectorOutput> {
+  private async executeWithRetryAndFallback(
+    prompt: string,
+    budget: DirectorExecutionBudget
+  ): Promise<RawDirectorOutput> {
     const startTime = Date.now();
-    let primaryAttempts = 0;
     let primaryLastError: unknown = null;
 
-    // --- Phase 1: Primary Model (this.modelName, e.g. gemini-3.7-flash) ---
-    const primaryMaxAttempts = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
+    const primaryLimit = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
+    const fallbackLimit = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
 
-    for (let attempt = 0; attempt < primaryMaxAttempts; attempt++) {
-      primaryAttempts++;
+    // Check if budget is already completely exhausted before attempting any new calls
+    if (!budget.hasRemainingBudget()) {
+      throw new ProviderError(
+        this.id,
+        "Gemini transport budget exhausted for this Director request",
+        {
+          code: "REQUEST_FAILED",
+          totalCallsUsed: budget.totalCallsUsed,
+          maxTotalCalls: budget.maxTotalCalls,
+        }
+      );
+    }
+
+    // --- Phase 1: Primary Model (this.modelName, e.g. gemini-3.7-flash) ---
+    while (budget.canMakePrimaryCall(primaryLimit)) {
+      budget.recordPrimaryCall();
       try {
         const result = await this.callGeminiApi(prompt, this.modelName);
         return {
@@ -345,13 +374,18 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
 
         // On full primary timeout, do not burn another 45 seconds on primary; fail over promptly
         if (this.isTimeoutError(err)) {
+          budget.recordPrimaryTimeout();
           break;
         }
 
-        // For retryable upstream errors (503, 502, network failure), retry on primary if attempts remain
+        // For retryable upstream errors (503, 502, network failure), retry on primary if budget allows
         if (this.isFallbackEligibleError(err)) {
-          if (attempt < primaryMaxAttempts - 1) {
-            const delayMs = Math.min(500 * Math.pow(2, attempt) + Math.random() * 50, 2000);
+          budget.recordFallbackEligible();
+          if (budget.canMakePrimaryCall(primaryLimit)) {
+            const delayMs = Math.min(
+              500 * Math.pow(2, budget.primaryAttemptsUsed - 1) + Math.random() * 50,
+              2000
+            );
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             continue;
           }
@@ -366,7 +400,8 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
     const canFallback =
       this.fallbackModelName &&
       this.fallbackModelName !== this.modelName &&
-      this.isFallbackEligibleError(primaryLastError);
+      (budget.fallbackEligibleEncountered || this.isFallbackEligibleError(primaryLastError)) &&
+      budget.canMakeFallbackCall(fallbackLimit);
 
     if (canFallback) {
       const safeReasonCode = this.extractSafeReasonCode(primaryLastError);
@@ -378,15 +413,16 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
           fromModel: this.modelName,
           toModel: this.fallbackModelName,
           reason: safeReasonCode,
-          primaryAttempts,
+          primaryAttempts: budget.primaryAttemptsUsed,
+          totalCallsUsed: budget.totalCallsUsed,
           elapsedMs,
         });
       }
 
-      const fallbackMaxAttempts = this.maxRetries > 0 ? Math.min(this.maxRetries, 2) : 1;
       let fallbackLastError: unknown = null;
 
-      for (let attempt = 0; attempt < fallbackMaxAttempts; attempt++) {
+      while (budget.canMakeFallbackCall(fallbackLimit)) {
+        budget.recordFallbackCall();
         try {
           const result = await this.callGeminiApi(prompt, this.fallbackModelName);
           return {
@@ -404,8 +440,11 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
             break;
           }
 
-          if (this.isFallbackEligibleError(err) && attempt < fallbackMaxAttempts - 1) {
-            const delayMs = Math.min(500 * Math.pow(2, attempt) + Math.random() * 50, 2000);
+          if (this.isFallbackEligibleError(err) && budget.canMakeFallbackCall(fallbackLimit)) {
+            const delayMs = Math.min(
+              500 * Math.pow(2, budget.fallbackAttemptsUsed - 1) + Math.random() * 50,
+              2000
+            );
             await new Promise((resolve) => setTimeout(resolve, delayMs));
             continue;
           }
