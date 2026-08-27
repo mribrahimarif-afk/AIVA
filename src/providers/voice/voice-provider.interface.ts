@@ -1,9 +1,13 @@
-/**
- * Contract for future text-to-speech providers (e.g. Azure Speech).
- * No implementation exists in TASK-001.
- */
+import { VoiceSynthesisResult, SupportedVoice } from "@/domain/voice";
+
+export interface VoiceSynthesisOptions {
+  text: string;
+  voiceName?: SupportedVoice;
+}
+
 export interface VoiceProvider {
   readonly id: string;
-
-  synthesize(text: string, options?: Record<string, unknown>): Promise<{ audioFilePath: string }>;
+  readonly defaultVoice: SupportedVoice;
+  isConfigured(): boolean;
+  synthesize(options: VoiceSynthesisOptions): Promise<VoiceSynthesisResult>;
 }

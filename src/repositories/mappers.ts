@@ -27,6 +27,11 @@ import {
   shotTypeSchema,
   productPresenceSchema,
 } from "@/domain/director";
+import type {
+  VoiceTrackAggregate,
+  VoiceTrackDto,
+  VoiceTrackWithBoundariesDto,
+} from "@/domain/voice";
 import { DataIntegrityError } from "@/domain/errors";
 
 function parseOrThrow<T>(schema: z.ZodType<T>, value: unknown, field: string, recordId: string): T {
@@ -242,6 +247,51 @@ export function toDirectorPlan(
     productId: row.productId ?? null,
     generatedAt: row.generatedAt,
     scenes: row.scenes ? row.scenes.map(toDirectorScene) : [],
+  };
+}
+
+export function toVoiceTrackDto(
+  aggregate: VoiceTrackAggregate,
+  currentScriptHash: string
+): VoiceTrackDto {
+  const isStale = aggregate.sourceScriptHash !== currentScriptHash;
+  return {
+    id: aggregate.id,
+    projectId: aggregate.projectId,
+    directorPlanId: aggregate.directorPlanId,
+    sourceScriptHash: aggregate.sourceScriptHash,
+    provider: aggregate.provider,
+    voiceName: aggregate.voiceName,
+    locale: aggregate.locale,
+    outputFormat: aggregate.outputFormat,
+    audioSha256: aggregate.audioSha256,
+    audioByteCount: aggregate.audioByteCount,
+    audioStorageRef: aggregate.audioStorageRef,
+    durationMs: aggregate.durationMs,
+    generatedAt: aggregate.generatedAt.toISOString(),
+    state: isStale ? "STALE" : "CURRENT",
+    boundaryCount: aggregate.boundaries.length,
+    audioUrl: `/api/projects/${aggregate.projectId}/voice/audio`,
+  };
+}
+
+export function toVoiceTrackWithBoundariesDto(
+  aggregate: VoiceTrackAggregate,
+  currentScriptHash: string,
+  originalScript: string
+): VoiceTrackWithBoundariesDto {
+  const dto = toVoiceTrackDto(aggregate, currentScriptHash);
+  return {
+    ...dto,
+    boundaries: aggregate.boundaries.map((b) => ({
+      id: b.id,
+      order: b.order,
+      sourceStart: b.sourceStart,
+      sourceEnd: b.sourceEnd,
+      audioStartMs: b.audioStartMs,
+      audioDurationMs: b.audioDurationMs,
+      text: originalScript.slice(b.sourceStart, b.sourceEnd),
+    })),
   };
 }
 

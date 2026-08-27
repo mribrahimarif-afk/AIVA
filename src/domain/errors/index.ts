@@ -5,3 +5,4 @@ export { ProviderError } from "./provider-error";
 export { RenderError } from "./render-error";
 export { NotFoundError } from "./not-found-error";
 export { DataIntegrityError } from "./data-integrity-error";
+export { DomainError } from "./domain-error";

@@ -3,11 +3,15 @@ import { GeminiDirectorProvider } from "@/providers/ai/gemini-director.provider"
 import { unitizeScript } from "@/domain/director/unitizer";
 import { validateAndReconstructPlan } from "@/domain/director/validation";
 
-const hasApiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0);
+const hasApiKey = Boolean(
+  process.env.GEMINI_API_KEY &&
+    process.env.GEMINI_API_KEY.startsWith("AIzaSy") &&
+    process.env.RUN_LIVE_TESTS === "true"
+);
 
-describe("Gemini Live API Smoke Test (Optional Local Only)", () => {
+describe("Gemini Live API Smoke Test (Opt-in)", () => {
   it.skipIf(!hasApiKey)(
-    "runs a minimal live Gemini Director analysis when GEMINI_API_KEY is present locally",
+    "runs a minimal live Gemini Director analysis when GEMINI_API_KEY is present and opt-in is enabled",
     async () => {
       const provider = new GeminiDirectorProvider({
         apiKey: process.env.GEMINI_API_KEY,
@@ -27,6 +31,7 @@ describe("Gemini Live API Smoke Test (Optional Local Only)", () => {
       const validation = validateAndReconstructPlan(rawOutput, units, tinyScript);
       expect(validation.success).toBe(true);
       expect(validation.scenes!.map((s) => s.text).join("")).toBe(tinyScript);
-    }
+    },
+    60000
   );
 });
