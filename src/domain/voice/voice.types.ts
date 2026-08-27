@@ -1,3 +1,7 @@
+export const VOICE_PROVIDERS = ["AZURE", "ELEVENLABS"] as const;
+export type VoiceProviderId = (typeof VOICE_PROVIDERS)[number];
+export const DEFAULT_VOICE_PROVIDER: VoiceProviderId = "AZURE";
+
 export const SUPPORTED_VOICES = [
   "ur-PK-AsadNeural",
   "ur-PK-UzmaNeural",
@@ -8,13 +12,15 @@ export const SUPPORTED_VOICES = [
 export type SupportedVoice = (typeof SUPPORTED_VOICES)[number];
 
 export interface VoiceProfile {
-  name: SupportedVoice;
+  name: string;
   displayName: string;
   language: string;
   locale: string;
-  gender: "Male" | "Female";
+  gender: "Male" | "Female" | "Neutral";
   description: string;
   isDefault?: boolean;
+  provider?: VoiceProviderId;
+  voiceId?: string;
 }
 
 export const VOICE_PROFILES: Record<SupportedVoice, VoiceProfile> = {
@@ -26,6 +32,7 @@ export const VOICE_PROFILES: Record<SupportedVoice, VoiceProfile> = {
     gender: "Male",
     description: "Natural Urdu male narration voice",
     isDefault: true,
+    provider: "AZURE",
   },
   "ur-PK-UzmaNeural": {
     name: "ur-PK-UzmaNeural",
@@ -34,6 +41,7 @@ export const VOICE_PROFILES: Record<SupportedVoice, VoiceProfile> = {
     locale: "ur-PK",
     gender: "Female",
     description: "Natural Urdu female narration voice",
+    provider: "AZURE",
   },
   "en-US-AndrewMultilingualNeural": {
     name: "en-US-AndrewMultilingualNeural",
@@ -42,6 +50,7 @@ export const VOICE_PROFILES: Record<SupportedVoice, VoiceProfile> = {
     locale: "en-US",
     gender: "Male",
     description: "Versatile multilingual male voice",
+    provider: "AZURE",
   },
   "en-US-AvaMultilingualNeural": {
     name: "en-US-AvaMultilingualNeural",
@@ -50,6 +59,7 @@ export const VOICE_PROFILES: Record<SupportedVoice, VoiceProfile> = {
     locale: "en-US",
     gender: "Female",
     description: "Versatile multilingual female voice",
+    provider: "AZURE",
   },
 };
 
@@ -72,6 +82,7 @@ export interface VoiceSynthesisResult {
   audioDurationTicks: number;
   voiceName: string;
   outputFormat: string;
+  model?: string;
   boundaries: RawVoiceBoundary[];
 }
 
@@ -91,6 +102,7 @@ export interface VoiceTrackDto {
   directorPlanId: string;
   sourceScriptHash: string;
   provider: string;
+  model: string;
   voiceName: string;
   locale: string;
   outputFormat: string;
@@ -109,7 +121,8 @@ export interface VoiceTrackWithBoundariesDto extends VoiceTrackDto {
 }
 
 export interface GenerateVoiceInput {
-  voiceName?: SupportedVoice;
+  provider?: VoiceProviderId | string;
+  voiceName?: string;
   force?: boolean;
 }
 
@@ -119,6 +132,7 @@ export interface VoiceTrackAggregate {
   directorPlanId: string;
   sourceScriptHash: string;
   provider: string;
+  model: string;
   voiceName: string;
   locale: string;
   outputFormat: string;

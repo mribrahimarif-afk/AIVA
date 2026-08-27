@@ -23,12 +23,52 @@ export interface VoiceServiceDependencies {
   projectRepository: ProjectRepository;
   directorPlanRepository: DirectorPlanRepository;
   voiceTrackRepository: VoiceTrackRepository;
-  voiceProvider: VoiceProvider;
+  voiceProvider?: VoiceProvider; // Legacy fallback
+  voiceProviders?: Record<string, VoiceProvider>;
   voiceStorageService: VoiceStorageService;
 }
 
 export class VoiceService {
-  constructor(private readonly deps: VoiceServiceDependencies) {}
+  private readonly providers: Map<string, VoiceProvider>;
+
+  constructor(private readonly deps: VoiceServiceDependencies) {
+    this.providers = new Map();
+    if (deps.voiceProviders) {
+      for (const [key, provider] of Object.entries(deps.voiceProviders)) {
+        this.providers.set(key.toLowerCase(), provider);
+      }
+    }
+    if (deps.voiceProvider) {
+      this.providers.set("azure", deps.voiceProvider);
+      this.providers.set("azure-speech", deps.voiceProvider);
+    }
+  }
+
+  getProvider(providerId?: string): VoiceProvider {
+    const rawId = (providerId || "AZURE").trim().toLowerCase();
+
+    if (rawId === "azure" || rawId === "azure-speech") {
+      const provider = this.providers.get("azure") || this.providers.get("azure-speech") || this.deps.voiceProvider;
+      if (!provider) {
+        throw new ProviderError("azure-speech", "Azure Speech provider is not registered", {
+          code: "VOICE_UNCONFIGURED",
+        });
+      }
+      return provider;
+    }
+
+    if (rawId === "elevenlabs") {
+      const provider = this.providers.get("elevenlabs");
+      if (!provider) {
+        throw new ProviderError("elevenlabs", "ElevenLabs provider is not registered", {
+          code: "VOICE_UNCONFIGURED",
+        });
+      }
+      return provider;
+    }
+
+    throw new DomainError("INVALID_PROVIDER", `Unsupported voice provider: ${providerId}`);
+  }
 
   async getVoiceTrack(projectId: string): Promise<VoiceTrackDto | null> {
     const project = await this.deps.projectRepository.findById(projectId);
@@ -91,29 +131,45 @@ export class VoiceService {
       );
     }
 
-    // 4. Validate requested voice
-    const requestedVoice = input.voiceName ?? (env.AZURE_SPEECH_VOICE as SupportedVoice) ?? DEFAULT_VOICE;
-    if (!(SUPPORTED_VOICES as readonly string[]).includes(requestedVoice)) {
-      throw new DomainError("INVALID_VOICE", `Unsupported voice profile: ${requestedVoice}`);
-    }
-    const voiceName = requestedVoice as SupportedVoice;
+    // 4. Resolve explicitly selected provider
+    const providerInstance = this.getProvider(input.provider);
 
-    // 5. Preflight check: provider configuration
-    if (!this.deps.voiceProvider.isConfigured()) {
-      throw new ProviderError(this.deps.voiceProvider.id, "Azure Speech provider is not configured", {
+    // 5. Preflight check: provider configuration (No silent fallback to other providers!)
+    if (!providerInstance.isConfigured()) {
+      const providerName = providerInstance.id === "elevenlabs" ? "ElevenLabs" : "Azure Speech";
+      throw new ProviderError(providerInstance.id, `${providerName} provider is not configured`, {
         code: "VOICE_UNCONFIGURED",
       });
     }
 
-    // 6. Idempotent reuse: if not forced and identical valid track already exists on disk
+    // 6. Validate and resolve voiceName & model based on provider
+    let voiceName: string;
+    let locale: string;
+    const model = providerInstance.defaultModel;
+
+    if (providerInstance.id === "azure-speech" || providerInstance.id === "azure") {
+      const requestedVoice = input.voiceName ?? (env.AZURE_SPEECH_VOICE as SupportedVoice) ?? DEFAULT_VOICE;
+      if (!(SUPPORTED_VOICES as readonly string[]).includes(requestedVoice)) {
+        throw new DomainError("INVALID_VOICE", `Unsupported voice profile: ${requestedVoice}`);
+      }
+      voiceName = requestedVoice;
+      locale = VOICE_PROFILES[requestedVoice as SupportedVoice]?.locale ?? "ur-PK";
+    } else {
+      // ElevenLabs
+      voiceName = input.voiceName && input.voiceName.trim().length > 0 ? input.voiceName.trim() : providerInstance.defaultVoice;
+      locale = "multilingual";
+    }
+
+    // 7. Composite Idempotent Reuse: match sourceScriptHash + provider + voiceName + model + outputFormat
     if (!input.force) {
       const existingTrack = await this.deps.voiceTrackRepository.getCurrentForProject(projectId);
       if (
         existingTrack &&
         existingTrack.directorPlanId === directorPlan.id &&
         existingTrack.sourceScriptHash === directorPlan.scriptHash &&
+        existingTrack.provider === providerInstance.id &&
         existingTrack.voiceName === voiceName &&
-        existingTrack.provider === this.deps.voiceProvider.id &&
+        existingTrack.model === model &&
         existingTrack.outputFormat === VOICE_OUTPUT_FORMAT
       ) {
         const fileExists = await this.deps.voiceStorageService.audioFileExists(existingTrack.audioStorageRef);
@@ -123,8 +179,9 @@ export class VoiceService {
             projectId,
             directorPlanId: directorPlan.id,
             scriptHash: directorPlan.scriptHash,
+            provider: providerInstance.id,
+            model,
             voiceName,
-            provider: this.deps.voiceProvider.id,
             outputFormat: VOICE_OUTPUT_FORMAT,
             storageRef: existingTrack.audioStorageRef,
           });
@@ -138,36 +195,38 @@ export class VoiceService {
     const capturedScriptHash = directorPlan.scriptHash;
     const capturedOriginalScript = directorPlan.originalScript;
 
-    // 7. Synthesize audio via VoiceProvider (plain-text, exact originalScript)
+    // 8. Synthesize audio via chosen VoiceProvider strictly (No auto-fallback on failure!)
     const startTime = Date.now();
-    const synthesisResult = await this.deps.voiceProvider.synthesize({
+    const synthesisResult = await providerInstance.synthesize({
       text: capturedOriginalScript,
       voiceName,
+      modelId: model,
     });
     const latencyMs = Date.now() - startTime;
 
-    // 8. Validate synthesis result against 14 invariants, byte limits, and transient event text alignment
+    // 9. Validate synthesis result against 14 invariants, byte limits, and transient event text alignment
     const validated = validateVoiceSynthesis(synthesisResult, {
       originalScript: capturedOriginalScript,
       maxDurationMs: env.VOICE_MAX_DURATION_MS,
       maxAudioBytes: env.VOICE_MAX_AUDIO_BYTES,
     });
 
-    // 9. Stage and atomically publish content-addressed WAV audio
+    // 10. Stage and atomically publish content-addressed WAV audio
     const published = await this.deps.voiceStorageService.stageAndPublishAudio(
       synthesisResult.audioData,
       projectId
     );
 
-    // 10. Persist VoiceTrack and boundaries inside repository transaction (with in-tx TOCTOU check)
+    // 11. Persist VoiceTrack and boundaries inside repository transaction (with in-tx TOCTOU check)
     try {
       const persisted = await this.deps.voiceTrackRepository.replaceTrack({
         projectId,
         directorPlanId: capturedDirectorPlanId,
         sourceScriptHash: capturedScriptHash,
-        provider: this.deps.voiceProvider.id,
+        provider: providerInstance.id,
+        model,
         voiceName,
-        locale: VOICE_PROFILES[voiceName]?.locale ?? "ur-PK",
+        locale,
         outputFormat: synthesisResult.outputFormat,
         audioSha256: published.audioSha256,
         audioByteCount: published.audioByteCount,
@@ -181,6 +240,8 @@ export class VoiceService {
         projectId,
         directorPlanId: capturedDirectorPlanId,
         scriptHash: capturedScriptHash,
+        provider: providerInstance.id,
+        model,
         voiceName,
         durationMs: validated.durationMs,
         boundaryCount: validated.boundaries.length,

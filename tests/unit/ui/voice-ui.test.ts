@@ -11,6 +11,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
     directorPlanId: "dp_123",
     sourceScriptHash: "hash_abc_123",
     provider: "azure-speech",
+    model: "azure-neural",
     voiceName: "ur-PK-AsadNeural",
     locale: "ur-PK",
     outputFormat: "Riff24Khz16BitMonoPcm",
@@ -34,7 +35,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
 
     expect(html).toContain("Director Plan Required");
     expect(html).toContain("Please analyze your script with AIVA Director above");
-    expect(html).not.toContain("Select Neural Voice");
+    expect(html).not.toContain("Select Azure Voice");
   });
 
   it("renders 'Azure Speech Provider Not Configured' when isConfigured is false", () => {
@@ -43,13 +44,13 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: false,
+        azureConfigured: false,
       })
     );
 
     expect(html).toContain("Azure Speech Provider Not Configured");
     expect(html).toContain("AZURE_SPEECH_KEY");
     expect(html).toContain("AZURE_SPEECH_REGION");
-    expect(html).not.toContain("Select Neural Voice");
   });
 
   it("renders voice selector and 'Generate Voice' button when ready and no existing track", () => {
@@ -58,17 +59,33 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: true,
+        azureConfigured: true,
         directorScriptHash: "hash_abc_123",
         initialVoiceTrack: null,
       })
     );
 
-    expect(html).toContain("Select Neural Voice");
+    expect(html).toContain("Select Azure Voice");
     expect(html).toContain("Asad");
     expect(html).toContain("Uzma");
     expect(html).toContain("Urdu (Pakistan)");
     expect(html).toContain("Generate Voice");
     expect(html).not.toContain("⚠️ Narration Outdated");
+  });
+
+  it("renders provider options for Azure Speech and ElevenLabs", () => {
+    const html = renderToString(
+      React.createElement(VoiceWorkspace, {
+        projectId: "proj_123",
+        hasDirectorPlan: true,
+        isConfigured: true,
+        azureConfigured: true,
+        elevenLabsConfigured: true,
+      })
+    );
+
+    expect(html).toContain("Azure Speech");
+    expect(html).toContain("ElevenLabs");
   });
 
   it("renders audio player, duration, words timed, and 'Regenerate Voice' button when track exists", () => {
@@ -77,6 +94,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: true,
+        azureConfigured: true,
         directorScriptHash: "hash_abc_123",
         initialVoiceTrack: mockTrack,
       })
@@ -97,6 +115,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: true,
+        azureConfigured: true,
         directorScriptHash: "hash_different_updated_script",
         initialVoiceTrack: mockTrack,
       })

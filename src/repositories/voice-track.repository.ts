@@ -7,6 +7,7 @@ export interface ReplaceVoiceTrackParams {
   directorPlanId: string;
   sourceScriptHash: string;
   provider: string;
+  model?: string;
   voiceName: string;
   locale: string;
   outputFormat: string;
@@ -43,6 +44,7 @@ export function createVoiceTrackRepository(prisma: PrismaClient): VoiceTrackRepo
         directorPlanId: track.directorPlanId,
         sourceScriptHash: track.sourceScriptHash,
         provider: track.provider,
+        model: track.model,
         voiceName: track.voiceName,
         locale: track.locale,
         outputFormat: track.outputFormat,
@@ -76,6 +78,7 @@ export function createVoiceTrackRepository(prisma: PrismaClient): VoiceTrackRepo
         directorPlanId,
         sourceScriptHash,
         provider,
+        model = "azure-neural",
         voiceName,
         locale,
         outputFormat,
@@ -112,6 +115,7 @@ export function createVoiceTrackRepository(prisma: PrismaClient): VoiceTrackRepo
             directorPlanId,
             sourceScriptHash,
             provider,
+            model,
             voiceName,
             locale,
             outputFormat,
@@ -125,6 +129,7 @@ export function createVoiceTrackRepository(prisma: PrismaClient): VoiceTrackRepo
             directorPlanId,
             sourceScriptHash,
             provider,
+            model,
             voiceName,
             locale,
             outputFormat,
@@ -169,6 +174,7 @@ export function createVoiceTrackRepository(prisma: PrismaClient): VoiceTrackRepo
           directorPlanId: voiceTrack.directorPlanId,
           sourceScriptHash: voiceTrack.sourceScriptHash,
           provider: voiceTrack.provider,
+          model: voiceTrack.model,
           voiceName: voiceTrack.voiceName,
           locale: voiceTrack.locale,
           outputFormat: voiceTrack.outputFormat,

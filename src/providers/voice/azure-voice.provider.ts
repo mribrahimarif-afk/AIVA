@@ -61,6 +61,7 @@ export function validateSynthesisTimeoutMs(val: unknown): number {
 export class AzureVoiceProvider implements VoiceProvider {
   readonly id = "azure-speech";
   readonly defaultVoice: SupportedVoice;
+  readonly defaultModel = "azure-neural";
   private readonly apiKey: string;
   private readonly region: string;
   private readonly timeoutMs: number;
@@ -81,6 +82,11 @@ export class AzureVoiceProvider implements VoiceProvider {
 
   isConfigured(): boolean {
     return Boolean(this.apiKey && this.apiKey.trim().length > 0 && this.region && this.region.trim().length > 0);
+  }
+
+  async listVoices() {
+    const { VOICE_PROFILES } = await import("@/domain/voice");
+    return Object.values(VOICE_PROFILES);
   }
 
   async synthesize(options: VoiceSynthesisOptions): Promise<VoiceSynthesisResult> {

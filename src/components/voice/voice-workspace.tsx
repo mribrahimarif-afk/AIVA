@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import {
-  SupportedVoice,
+  VoiceProviderId,
   VoiceProfile,
   VoiceTrackDto,
   VOICE_PROFILES,
@@ -16,9 +16,15 @@ interface VoiceWorkspaceProps {
   hasDirectorPlan: boolean;
   directorScriptHash?: string;
   initialVoiceTrack?: VoiceTrackDto | null;
-  isConfigured?: boolean;
-  defaultVoice?: string;
-  supportedVoices?: VoiceProfile[];
+  isConfigured?: boolean; // legacy prop
+  azureConfigured?: boolean;
+  elevenLabsConfigured?: boolean;
+  defaultVoice?: string; // legacy prop
+  defaultAzureVoice?: string;
+  defaultElevenLabsVoice?: string;
+  supportedVoices?: VoiceProfile[]; // legacy prop
+  azureVoices?: VoiceProfile[];
+  elevenLabsVoices?: VoiceProfile[];
 }
 
 export function VoiceWorkspace({
@@ -27,18 +33,53 @@ export function VoiceWorkspace({
   directorScriptHash,
   initialVoiceTrack = null,
   isConfigured = true,
+  azureConfigured,
+  elevenLabsConfigured = false,
   defaultVoice = "ur-PK-AsadNeural",
+  defaultAzureVoice = "ur-PK-AsadNeural",
+  defaultElevenLabsVoice = "21m00Tcm4TlvDq8ikWAM",
   supportedVoices = Object.values(VOICE_PROFILES),
+  azureVoices,
+  elevenLabsVoices = [],
 }: VoiceWorkspaceProps) {
-  const [selectedVoice, setSelectedVoice] = useState<SupportedVoice>(
-    (initialVoiceTrack?.voiceName as SupportedVoice) || (defaultVoice as SupportedVoice)
+  const isAzureConfig = azureConfigured !== undefined ? azureConfigured : isConfigured;
+  const activeAzureVoices = azureVoices && azureVoices.length > 0 ? azureVoices : supportedVoices;
+
+  const initialProvider: VoiceProviderId =
+    initialVoiceTrack?.provider === "elevenlabs" || initialVoiceTrack?.provider === "ELEVENLABS"
+      ? "ELEVENLABS"
+      : "AZURE";
+
+  const [selectedProvider, setSelectedProvider] = useState<VoiceProviderId>(initialProvider);
+  const [selectedVoice, setSelectedVoice] = useState<string>(
+    initialVoiceTrack?.voiceName ||
+      (initialProvider === "ELEVENLABS" ? defaultElevenLabsVoice : defaultAzureVoice || defaultVoice)
   );
+
   const [track, setTrack] = useState<VoiceTrackDto | null>(initialVoiceTrack);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Sync selected voice when provider changes if current voice doesn't belong to provider
+  useEffect(() => {
+    if (selectedProvider === "AZURE") {
+      const exists = activeAzureVoices.some((v) => v.name === selectedVoice);
+      if (!exists) {
+        setSelectedVoice(defaultAzureVoice || activeAzureVoices[0]?.name || "ur-PK-AsadNeural");
+      }
+    } else {
+      const exists = elevenLabsVoices.some((v) => v.name === selectedVoice || v.voiceId === selectedVoice);
+      if (!exists) {
+        setSelectedVoice(defaultElevenLabsVoice || elevenLabsVoices[0]?.name || "21m00Tcm4TlvDq8ikWAM");
+      }
+    }
+  }, [selectedProvider, selectedVoice, activeAzureVoices, elevenLabsVoices, defaultAzureVoice, defaultElevenLabsVoice]);
+
   const isStale =
     track && directorScriptHash && track.sourceScriptHash !== directorScriptHash;
+
+  const isCurrentProviderConfigured =
+    selectedProvider === "AZURE" ? isAzureConfig : elevenLabsConfigured;
 
   async function handleGenerateVoice(force = false) {
     if (isGenerating) return;
@@ -51,6 +92,7 @@ export function VoiceWorkspace({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: selectedProvider,
           voiceName: selectedVoice,
           force,
         }),
@@ -78,6 +120,8 @@ export function VoiceWorkspace({
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   }
 
+  const currentVoiceList = selectedProvider === "AZURE" ? activeAzureVoices : elevenLabsVoices;
+
   return (
     <Card className="p-6 bg-slate-900/60 border-slate-800 backdrop-blur-md rounded-xl space-y-6">
       <div className="flex items-center justify-between border-b border-slate-800 pb-4">
@@ -86,14 +130,12 @@ export function VoiceWorkspace({
             <span>🎙️</span> AIVA Voice
           </h2>
           <p className="text-sm text-slate-400 mt-1">
-            Azure Neural text-to-speech with exact source-aligned word timing
+            Multi-provider neural text-to-speech with exact source-aligned word timing
           </p>
         </div>
 
         {track && (
-          <Badge
-            tone={isStale ? "warning" : "success"}
-          >
+          <Badge tone={isStale ? "warning" : "success"}>
             {isStale ? "⚠️ Narration Outdated" : "✓ Active Track"}
           </Badge>
         )}
@@ -109,19 +151,8 @@ export function VoiceWorkspace({
         </div>
       )}
 
-      {/* State 2: Unconfigured Provider */}
-      {hasDirectorPlan && !isConfigured && (
-        <div className="p-4 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300 text-sm">
-          <p className="font-semibold text-slate-200">Azure Speech Provider Not Configured</p>
-          <p className="mt-1 text-slate-400">
-            Configure <code className="text-indigo-300 font-mono">AZURE_SPEECH_KEY</code> and{" "}
-            <code className="text-indigo-300 font-mono">AZURE_SPEECH_REGION</code> in your environment to enable neural narration.
-          </p>
-        </div>
-      )}
-
-      {/* State 3: Active / Stale / Ready Workspace */}
-      {hasDirectorPlan && isConfigured && (
+      {/* State 2: Active / Stale / Ready Workspace */}
+      {hasDirectorPlan && (
         <div className="space-y-5">
           {/* Stale warning banner */}
           {isStale && (
@@ -159,54 +190,132 @@ export function VoiceWorkspace({
             </div>
           )}
 
-          {/* Voice Selector & Actions */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
-            <div className="sm:col-span-2 space-y-1.5">
-              <label htmlFor="voice-select" className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-                Select Neural Voice
-              </label>
-              <select
-                id="voice-select"
-                value={selectedVoice}
-                onChange={(e) => setSelectedVoice(e.target.value as SupportedVoice)}
-                disabled={isGenerating}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+          {/* Provider Selection Tabs / Radios */}
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+              Voice Provider
+            </label>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setSelectedProvider("AZURE")}
+                className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-medium border transition-all ${
+                  selectedProvider === "AZURE"
+                    ? "bg-indigo-600/20 border-indigo-500 text-indigo-200"
+                    : "bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700"
+                }`}
               >
-                {supportedVoices.map((voice) => (
-                  <option key={voice.name} value={voice.name}>
-                    {voice.displayName} — {voice.language} ({voice.gender})
-                  </option>
-                ))}
-              </select>
-            </div>
+                <div className="flex items-center justify-center gap-2">
+                  <span>🌐 Azure Speech</span>
+                  {isAzureConfig ? (
+                    <span className="text-xs text-emerald-400">●</span>
+                  ) : (
+                    <span className="text-xs text-slate-500">○</span>
+                  )}
+                </div>
+              </button>
 
-            <div>
-              <Button
-                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
-                onClick={() => handleGenerateVoice(Boolean(track))}
-                disabled={isGenerating}
+              <button
+                type="button"
+                onClick={() => setSelectedProvider("ELEVENLABS")}
+                className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-medium border transition-all ${
+                  selectedProvider === "ELEVENLABS"
+                    ? "bg-indigo-600/20 border-indigo-500 text-indigo-200"
+                    : "bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700"
+                }`}
               >
-                {isGenerating ? (
-                  <span className="flex items-center gap-2">
-                    <span className="animate-spin">⏳</span> Synthesizing...
-                  </span>
-                ) : track ? (
-                  "Regenerate Voice"
-                ) : (
-                  "Generate Voice"
-                )}
-              </Button>
+                <div className="flex items-center justify-center gap-2">
+                  <span>⚡ ElevenLabs</span>
+                  {elevenLabsConfigured ? (
+                    <span className="text-xs text-emerald-400">●</span>
+                  ) : (
+                    <span className="text-xs text-slate-500">○</span>
+                  )}
+                </div>
+              </button>
             </div>
           </div>
+
+          {/* Unconfigured Provider Banner */}
+          {!isCurrentProviderConfigured && (
+            <div className="p-4 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300 text-sm">
+              <p className="font-semibold text-slate-200">
+                {selectedProvider === "AZURE" ? "Azure Speech Provider Not Configured" : "ElevenLabs is not configured."}
+              </p>
+              <p className="mt-1 text-slate-400">
+                {selectedProvider === "AZURE" ? (
+                  <>
+                    Configure <code className="text-indigo-300 font-mono">AZURE_SPEECH_KEY</code> and{" "}
+                    <code className="text-indigo-300 font-mono">AZURE_SPEECH_REGION</code> in your environment to enable Azure narration.
+                  </>
+                ) : (
+                  <>
+                    Configure <code className="text-indigo-300 font-mono">ELEVENLABS_API_KEY</code> in your environment to enable ElevenLabs narration.
+                  </>
+                )}
+              </p>
+            </div>
+          )}
+
+          {/* Voice Selector & Actions */}
+          {isCurrentProviderConfigured && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+              <div className="sm:col-span-2 space-y-1.5">
+                <label htmlFor="voice-select" className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                  {`Select ${selectedProvider === "AZURE" ? "Azure" : "ElevenLabs"} Voice`}
+                </label>
+                <select
+                  id="voice-select"
+                  value={selectedVoice}
+                  onChange={(e) => setSelectedVoice(e.target.value)}
+                  disabled={isGenerating}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+                >
+                  {currentVoiceList.map((voice) => (
+                    <option key={voice.name} value={voice.name}>
+                      {voice.displayName} — {voice.language} ({voice.gender})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <Button
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
+                  onClick={() => handleGenerateVoice(Boolean(track))}
+                  disabled={isGenerating}
+                >
+                  {isGenerating ? (
+                    <span className="flex items-center gap-2">
+                      <span className="animate-spin">⏳</span> Synthesizing...
+                    </span>
+                  ) : track ? (
+                    "Regenerate Voice"
+                  ) : (
+                    "Generate Voice"
+                  )}
+                </Button>
+              </div>
+            </div>
+          )}
 
           {/* Audio Player & Track Details */}
           {track && (
             <div className="p-4 rounded-lg bg-slate-950/80 border border-slate-800 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
                 <div className="flex items-center gap-2">
-                  <span className="text-slate-300 font-medium">
-                    {VOICE_PROFILES[track.voiceName as SupportedVoice]?.displayName || track.voiceName}
+                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                    {track.provider === "elevenlabs" || track.provider === "ELEVENLABS" ? "ElevenLabs" : "Azure Speech"}
                   </span>
+                  <span className="text-slate-300 font-medium">
+                    {VOICE_PROFILES[track.voiceName as keyof typeof VOICE_PROFILES]?.displayName || track.voiceName}
+                  </span>
+                  {track.model && (
+                    <>
+                      <span>•</span>
+                      <span className="text-slate-400">{track.model}</span>
+                    </>
+                  )}
                   <span>•</span>
                   <span>Duration: {formatDuration(track.durationMs)} ({track.durationMs} ms)</span>
                   <span>•</span>

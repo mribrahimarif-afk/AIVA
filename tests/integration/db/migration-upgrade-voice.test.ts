@@ -164,7 +164,7 @@ describe("Isolated Database Migration Upgrade Verification (TASK-003 -> TASK-004
       },
     });
 
-    // 3. Apply ONLY TASK-004 migration SQL
+    // 3. Apply TASK-004 migration SQL
     const voiceMigrationSql = fs.readFileSync(
       path.resolve(
         process.cwd(),
@@ -174,6 +174,19 @@ describe("Isolated Database Migration Upgrade Verification (TASK-003 -> TASK-004
     );
 
     for (const stmt of voiceMigrationSql.split(";").map((s) => s.trim()).filter(Boolean)) {
+      await prisma.$executeRawUnsafe(stmt);
+    }
+
+    // 4. Apply TASK-004A voice_track_model migration SQL
+    const modelMigrationSql = fs.readFileSync(
+      path.resolve(
+        process.cwd(),
+        "prisma/migrations/20260828050000_voice_track_model/migration.sql"
+      ),
+      "utf8"
+    );
+
+    for (const stmt of modelMigrationSql.split(";").map((s) => s.trim()).filter(Boolean)) {
       await prisma.$executeRawUnsafe(stmt);
     }
   });

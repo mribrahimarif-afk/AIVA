@@ -66,6 +66,7 @@ export interface FakeVoiceProviderOptions {
 export class FakeVoiceProvider implements VoiceProvider {
   readonly id = "fake-voice-provider";
   readonly defaultVoice: SupportedVoice = DEFAULT_VOICE;
+  readonly defaultModel = "fake-voice-model";
 
   private configured: boolean;
   private errorToThrow?: Error;
