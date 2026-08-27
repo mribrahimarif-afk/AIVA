@@ -84,7 +84,7 @@ export class ResilientDirectorProvider implements DirectorAiProvider {
         },
       });
 
-      // Route 2: Gemini Google Fallback (gemini-2.5-flash)
+      // Route 2: Gemini Google Fallback (gemini-3.6-flash)
       if (
         this.geminiProvider.fallbackModelName &&
         this.geminiProvider.fallbackModelName !== this.geminiProvider.modelName

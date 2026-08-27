@@ -530,16 +530,16 @@ describe("DirectorService Integration & Atomicity Tests", () => {
       const defaultPlan = fakeAiProvider.generateDefaultValidPlan(input);
       return {
         ...defaultPlan,
-        model: "gemini-2.5-flash",
+        model: "gemini-3.6-flash",
       };
     };
 
     const plan = await service.analyzeAndPlan(project.id, { script });
-    expect(plan.model).toBe("gemini-2.5-flash");
+    expect(plan.model).toBe("gemini-3.6-flash");
 
     // Verify DB persisted record
     const retrieved = await service.getPlan(project.id);
-    expect(retrieved?.model).toBe("gemini-2.5-flash");
+    expect(retrieved?.model).toBe("gemini-3.6-flash");
   });
 
   it("proves analyze and repair share the same request-scoped budget and counters are preserved", async () => {

@@ -209,7 +209,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
   constructor(options: GeminiDirectorProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() || "";
     this.modelName = options.model?.trim() || "gemini-3.7-flash";
-    this.fallbackModelName = options.fallbackModel?.trim() || "gemini-2.5-flash";
+    this.fallbackModelName = options.fallbackModel?.trim() || "gemini-3.6-flash";
     this.logger = options.logger;
     this.timeoutMs =
       typeof options.timeoutMs === "number" &&
@@ -422,7 +422,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       }
     }
 
-    // --- Phase 2: Fallback Model (this.fallbackModelName, e.g. gemini-2.5-flash) ---
+    // --- Phase 2: Fallback Model (this.fallbackModelName, e.g. gemini-3.6-flash) ---
     const canFallback =
       this.fallbackModelName &&
       this.fallbackModelName !== this.modelName &&

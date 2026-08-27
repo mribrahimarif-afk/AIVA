@@ -8,7 +8,7 @@ import type { RawDirectorOutput, RawDirectorScene } from "@/domain/director";
 export class FakeDirectorProvider implements DirectorAiProvider {
   readonly id = "fake-director";
   readonly modelName = "gemini-3.7-flash-mock";
-  readonly fallbackModelName = "gemini-2.5-flash-mock";
+  readonly fallbackModelName = "gemini-3.6-flash-mock";
   public configured = true;
   public analyzeCallCount = 0;
   public repairCallCount = 0;

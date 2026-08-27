@@ -54,7 +54,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
     vi.restoreAllMocks();
   });
 
-  it("1. GEMINI 3.7 SUCCESS: primary succeeds on 1st call -> Gemini 2.5 and OpenRouter unused", async () => {
+  it("1. GEMINI 3.7 SUCCESS: primary succeeds on 1st call -> Gemini 3.6 and OpenRouter unused", async () => {
     const gemini = new GeminiDirectorProvider({ apiKey: "test-gemini-key" });
     const openrouter = new OpenRouterDirectorProvider({ apiKey: "test-openrouter-key" });
 
@@ -100,7 +100,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
         gemini37Calls++;
         throw new Error("503 Service Unavailable");
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         gemini25Calls++;
         return makeValidOutput(input.scriptUnits, model);
       }
@@ -121,13 +121,13 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
     const units = unitizeScript(englishScript);
     const result = await resilient.analyze({ scriptUnits: units, budget });
 
-    expect(result.model).toBe("gemini-2.5-flash");
+    expect(result.model).toBe("gemini-3.6-flash");
     expect(gemini25Calls).toBe(1);
     expect(openrouterCalls).toBe(0);
     expect(budget.fallbackAttemptsUsed).toBe(1);
   });
 
-  it("3. GEMINI 3.7 RATE_LIMITED: NO same-model retry -> immediately advances to Gemini 2.5", async () => {
+  it("3. GEMINI 3.7 RATE_LIMITED: NO same-model retry -> immediately advances to Gemini 3.6", async () => {
     const gemini = new GeminiDirectorProvider({ apiKey: "test-gemini-key" });
     const openrouter = new OpenRouterDirectorProvider({ apiKey: "test-openrouter-key" });
 
@@ -142,7 +142,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
           status: 429,
         });
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         gemini25Calls++;
         return makeValidOutput(input.scriptUnits, model);
       }
@@ -158,7 +158,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
     const units = unitizeScript(englishScript);
     const result = await resilient.analyze({ scriptUnits: units, budget });
 
-    expect(result.model).toBe("gemini-2.5-flash");
+    expect(result.model).toBe("gemini-3.6-flash");
     // Assert strictly NO same-model retry occurred on Gemini 3.7
     expect(gemini37Calls).toBe(1);
     expect(gemini25Calls).toBe(1);
@@ -181,7 +181,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
           status: 429,
         });
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         gemini25Calls++;
         throw new ProviderError("gemini", "429 Resource Exhausted", {
           code: "RATE_LIMITED",
@@ -255,7 +255,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
           timeoutMs: 45000,
         });
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         gemini25Calls++;
         return makeValidOutput(input.scriptUnits, model);
       }
@@ -271,7 +271,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
     const units = unitizeScript(englishScript);
     const result = await resilient.analyze({ scriptUnits: units, budget });
 
-    expect(result.model).toBe("gemini-2.5-flash");
+    expect(result.model).toBe("gemini-3.6-flash");
     expect(gemini37Calls).toBe(1); // Promptly broke without 2nd 45s attempt
     expect(gemini25Calls).toBe(1);
     expect(budget.timedOutRoutes.has("gemini-primary")).toBe(true);
@@ -622,7 +622,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
         gemini37Attempts++;
         throw new Error("503 Service Unavailable");
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         gemini25Attempts++;
         throw new Error("503 Service Unavailable");
       }
@@ -647,7 +647,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
     expect(miniMaxReached).toBe(true);
     expect(result.model).toBe("minimax/minimax-m3:free");
     expect(budget.totalCallsUsed).toBe(4);
-    // Prove Gemini 3.7 got 2 calls, Gemini 2.5 got 1 call, and MiniMax got 1 call = 4 calls total
+    // Prove Gemini 3.7 got 2 calls, Gemini 3.6 got 1 call, and MiniMax got 1 call = 4 calls total
     expect(gemini37Attempts).toBe(2);
     expect(gemini25Attempts).toBe(1);
   });
@@ -665,7 +665,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
         }
         throw new ProviderError("gemini", "Timeout", { code: "TIMEOUT", timeoutMs: 45000 });
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         // Return output requiring repair
         return {
           language: "ENGLISH",
@@ -738,7 +738,7 @@ describe("ResilientDirectorProvider Multi-Provider Resilience Tests", () => {
           status: 429,
         });
       }
-      if (model === "gemini-2.5-flash") {
+      if (model === "gemini-3.6-flash") {
         return {
           language: "ENGLISH",
           contentType: "ADVERTISEMENT",
