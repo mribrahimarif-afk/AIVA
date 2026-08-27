@@ -63,4 +63,68 @@ describe("Script Fidelity & Narration Reconstruction Invariant", () => {
     const recombined = scenes.map((s) => s.text).join("");
     expect(recombined).toBe(originalScript);
   });
+
+  it("preserves exact leading/trailing spaces, blank lines, tabs, CRLF, Urdu, Roman Urdu, and emojis", () => {
+    const complexScript =
+      "  \t\r\nPehela sentence Roman Urdu mein hai!\r\n\r\nیہ دوسرا جملہ اردو رسم الخط میں ہے۔ 🚀\n   Third sentence with leading/trailing tabs and spaces.\t  \n";
+
+    const units = unitizeScript(complexScript);
+    expect(units.length).toBeGreaterThan(0);
+
+    // 1. Invariant: Reconstructed script from deterministic unitizer is byte-for-byte exact
+    const reconstructedFromUnits = units.map((u) => u.text).join("");
+    expect(reconstructedFromUnits).toBe(complexScript);
+    expect(reconstructedFromUnits.length).toBe(complexScript.length);
+
+    // 2. Validate with mock scene plan grouping units
+    const rawOutput: RawDirectorOutput = {
+      language: "URDU",
+      contentType: "ADVERTISEMENT",
+      summary: "Mixed script commercial with exact formatting.",
+      creativeDirection: "Vibrant storytelling with dynamic visuals.",
+      scenes: [
+        {
+          order: 1,
+          unitIds: units.slice(0, Math.ceil(units.length / 2)).map((u) => u.id),
+          purpose: "HOOK",
+          visualBrief: "Scene 1 showing first part of complex script.",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Energetic",
+          setting: "City street",
+          subject: "Young creator",
+          productPresence: "NOT_NEEDED",
+          searchQuery: "creator phone city",
+          keywords: ["creator", "lifestyle"],
+          manualAiPrompt: null,
+        },
+        {
+          order: 2,
+          unitIds: units.slice(Math.ceil(units.length / 2)).map((u) => u.id),
+          purpose: "CTA",
+          visualBrief: "Scene 2 closing shot with call to action.",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Inspiring",
+          setting: "Studio",
+          subject: "Product display",
+          productPresence: "PREFERRED",
+          searchQuery: "modern studio product display",
+          keywords: ["display", "modern"],
+          manualAiPrompt: null,
+        },
+      ],
+    };
+
+    const validation = validateAndReconstructPlan(rawOutput, units, complexScript);
+    expect(validation.success).toBe(true);
+
+    const scenes = validation.scenes!;
+    expect(scenes).toHaveLength(2);
+
+    // 3. Reconstructed script from validated scenes matches complexScript exactly
+    const fullRecombinedFromScenes = scenes.map((s) => s.text).join("");
+    expect(fullRecombinedFromScenes).toBe(complexScript);
+    expect(fullRecombinedFromScenes.charCodeAt(0)).toBe(complexScript.charCodeAt(0));
+  });
 });

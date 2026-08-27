@@ -42,9 +42,12 @@ export const rawDirectorOutputSchema = z.object({
 export const analyzeScriptInputSchema = z.object({
   script: z
     .string()
-    .trim()
-    .min(1, "Script cannot be empty")
-    .max(50000, "Script exceeds maximum character limit of 50,000 characters"),
+    .refine((val) => val.trim().length > 0, {
+      message: "Script cannot be empty or only whitespace",
+    })
+    .refine((val) => val.length <= 50000, {
+      message: "Script exceeds maximum character limit of 50,000 characters",
+    }),
   brandId: z.string().trim().min(1).optional(),
   productId: z.string().trim().min(1).optional(),
 });

@@ -124,13 +124,77 @@ describe("DirectorService Integration & Atomicity Tests", () => {
     ).rejects.toThrow(ValidationError);
   });
 
-  it("handles single bounded repair when initial generation fails local validation", async () => {
+  it("handles single bounded repair when initial generation fails local validation and persists repaired metadata", async () => {
     const project = await projectRepo.create({
       name: "Repair Test",
       script: "",
       aspectRatio: "9:16",
     });
-    fakeAiProvider.failFirstAttemptWithInvalid = true; // Triggers initial validation failure
+
+    // Custom initial output that fails validation (missing u0002) with distinct metadata
+    fakeAiProvider.customAnalyze = async (input) => ({
+      language: "ENGLISH",
+      contentType: "ADVERTISEMENT",
+      summary: "INITIAL INVALID SUMMARY",
+      creativeDirection: "INITIAL INVALID CREATIVE DIRECTION",
+      scenes: [
+        {
+          order: 1,
+          unitIds: [input.scriptUnits[0]?.id || "u0001"], // Omits u0002 -> triggers repair
+          purpose: "HOOK",
+          visualBrief: "Initial brief with missing unit 2",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Energetic",
+          setting: "Urban",
+          subject: "Person",
+          productPresence: "PREFERRED",
+          searchQuery: "urban runner",
+          keywords: ["urban"],
+          manualAiPrompt: null,
+        },
+      ],
+    });
+
+    // Custom repair output with all units and deliberately different metadata
+    fakeAiProvider.customRepair = async (input) => ({
+      language: "URDU",
+      contentType: "PRODUCT_SHOWCASE",
+      summary: "REPAIRED VALID SUMMARY",
+      creativeDirection: "REPAIRED VALID CREATIVE DIRECTION",
+      scenes: [
+        {
+          order: 1,
+          unitIds: [input.scriptUnits[0]?.id || "u0001"],
+          purpose: "HOOK",
+          visualBrief: "Repaired visual brief for scene 1",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Energetic",
+          setting: "Urban",
+          subject: "Person",
+          productPresence: "PREFERRED",
+          searchQuery: "urban runner",
+          keywords: ["urban"],
+          manualAiPrompt: null,
+        },
+        {
+          order: 2,
+          unitIds: [input.scriptUnits[1]?.id || "u0002"],
+          purpose: "CTA",
+          visualBrief: "Repaired visual brief for scene 2",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Confident",
+          setting: "Studio",
+          subject: "Customer",
+          productPresence: "PREFERRED",
+          searchQuery: "happy customer",
+          keywords: ["customer"],
+          manualAiPrompt: null,
+        },
+      ],
+    });
 
     const scriptText = "Sentence one is here. Sentence two is following.";
 
@@ -140,8 +204,101 @@ describe("DirectorService Integration & Atomicity Tests", () => {
 
     expect(fakeAiProvider.analyzeCallCount).toBe(1);
     expect(fakeAiProvider.repairCallCount).toBe(1);
-    expect(plan).toBeDefined();
-    expect(plan.scenes.length).toBeGreaterThanOrEqual(1);
+
+    // Verify persisted and returned metadata matches REPAIRED output, not initial invalid output
+    expect(plan.language).toBe("URDU");
+    expect(plan.contentType).toBe("PRODUCT_SHOWCASE");
+    expect(plan.summary).toBe("REPAIRED VALID SUMMARY");
+    expect(plan.creativeDirection).toBe("REPAIRED VALID CREATIVE DIRECTION");
+    expect(plan.scenes).toHaveLength(2);
+    expect(plan.scenes[0]?.visualBrief).toBe("Repaired visual brief for scene 1");
+    expect(plan.scenes[1]?.visualBrief).toBe("Repaired visual brief for scene 2");
+
+    // Verify DB record matches
+    const persisted = await service.getPlan(project.id);
+    expect(persisted).not.toBeNull();
+    expect(persisted!.language).toBe("URDU");
+    expect(persisted!.contentType).toBe("PRODUCT_SHOWCASE");
+    expect(persisted!.summary).toBe("REPAIRED VALID SUMMARY");
+    expect(persisted!.creativeDirection).toBe("REPAIRED VALID CREATIVE DIRECTION");
+  });
+
+  it("proves a failed repair throws ProviderError and never replaces previously persisted DirectorPlan", async () => {
+    const project = await projectRepo.create({
+      name: "Failed Repair Test",
+      script: "",
+      aspectRatio: "9:16",
+    });
+
+    // 1. Establish initial good plan
+    const initialPlan = await service.analyzeAndPlan(project.id, {
+      script: "Initial stable script. Second sentence.",
+    });
+    expect(initialPlan.summary).not.toBe("STILL BROKEN");
+
+    // 2. Set up provider so analyze fails AND repair fails
+    fakeAiProvider.customAnalyze = async (input) => ({
+      language: "ENGLISH",
+      contentType: "ADVERTISEMENT",
+      summary: "INVALID INITIAL",
+      creativeDirection: "INVALID INITIAL",
+      scenes: [
+        {
+          order: 1,
+          unitIds: [input.scriptUnits[0]?.id || "u0001"], // Omits unit 2
+          purpose: "HOOK",
+          visualBrief: "Invalid brief 1",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Energetic",
+          setting: "Urban",
+          subject: "Person",
+          productPresence: "PREFERRED",
+          searchQuery: "urban runner",
+          keywords: ["urban"],
+          manualAiPrompt: null,
+        },
+      ],
+    });
+
+    fakeAiProvider.customRepair = async (input) => ({
+      language: "ENGLISH",
+      contentType: "ADVERTISEMENT",
+      summary: "STILL BROKEN",
+      creativeDirection: "STILL BROKEN",
+      scenes: [
+        {
+          order: 1,
+          unitIds: [input.scriptUnits[0]?.id || "u0001"], // Still omits unit 2
+          purpose: "HOOK",
+          visualBrief: "Still broken brief",
+          visualSourceHint: "STOCK",
+          shotType: "LIFESTYLE",
+          mood: "Energetic",
+          setting: "Urban",
+          subject: "Person",
+          productPresence: "PREFERRED",
+          searchQuery: "urban runner",
+          keywords: ["urban"],
+          manualAiPrompt: null,
+        },
+      ],
+    });
+
+    await expect(
+      service.analyzeAndPlan(project.id, {
+        script: "New attempt script. That fails repair.",
+      })
+    ).rejects.toThrow(ProviderError);
+
+    // Exactly 1 repair call occurred (no second repair loop)
+    expect(fakeAiProvider.repairCallCount).toBe(1);
+
+    // Verify the previously persisted plan is still 100% intact
+    const planAfterFailedRepair = await service.getPlan(project.id);
+    expect(planAfterFailedRepair).not.toBeNull();
+    expect(planAfterFailedRepair!.id).toBe(initialPlan.id);
+    expect(planAfterFailedRepair!.originalScript).toBe("Initial stable script. Second sentence.");
   });
 
   it("re-analysis atomically replaces existing scenes and updates generatedAt", async () => {

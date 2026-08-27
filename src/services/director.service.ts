@@ -152,6 +152,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
 
       // 8. Validate 10 coverage invariants + cross-field rules
       let validation = validateAndReconstructPlan(rawOutput, scriptUnits, script);
+      let finalRawOutput = rawOutput;
 
       // 9. Single bounded repair attempt if invalid
       if (!validation.success || !validation.scenes) {
@@ -182,6 +183,8 @@ export function createDirectorService(options: DirectorServiceOptions): Director
             }
           );
         }
+
+        finalRawOutput = repairedRawOutput;
       }
 
       const validatedScenes: DirectorScene[] = validation.scenes;
@@ -197,10 +200,10 @@ export function createDirectorService(options: DirectorServiceOptions): Director
           schemaVersion: DIRECTOR_SCHEMA_VERSION,
           promptVersion: DIRECTOR_PROMPT_VERSION,
           model: directorAiProvider.modelName,
-          language: rawOutput.language,
-          contentType: rawOutput.contentType,
-          summary: rawOutput.summary,
-          creativeDirection: rawOutput.creativeDirection,
+          language: finalRawOutput.language,
+          contentType: finalRawOutput.contentType,
+          summary: finalRawOutput.summary,
+          creativeDirection: finalRawOutput.creativeDirection,
           brandId: input.brandId ?? null,
           productId: input.productId ?? null,
         },

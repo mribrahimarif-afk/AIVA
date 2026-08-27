@@ -28,5 +28,5 @@
     "**/*.tsx",
     ".next/types/**/*.ts"
   ],
-  "exclude": ["node_modules", "storage", "prisma-test"]
+  "exclude": ["node_modules", "storage", "prisma-test", "TASK-003-review-bundle", "TASK-*-review-bundle"]
 }

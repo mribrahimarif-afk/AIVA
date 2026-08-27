@@ -118,4 +118,45 @@ describe("Director API Routes Integration Tests", () => {
     expect(getBody.plan).not.toBeNull();
     expect(getBody.plan.originalScript).toBe(scriptText);
   });
+
+  it("POST /api/projects/[id]/director/analyze preserves exact script with leading/trailing whitespace, tabs, CRLF, and Urdu without trimming", async () => {
+    const fakeProvider = new FakeDirectorProvider();
+    vi.spyOn(directorAiProvider, "isConfigured").mockReturnValue(true);
+    vi.spyOn(directorAiProvider, "analyze").mockImplementation((input) =>
+      fakeProvider.analyze(input)
+    );
+
+    const complexScript =
+      "  \t\r\nPehela scene Roman Urdu mein shuru hota hai.\r\n\r\nیہ دوسرا سین اردو رسم الخط میں ہے۔ ✨\n\tFinal scene with trailing spaces and tabs.\t  \r\n";
+
+    const response = await POST(
+      new Request("http://localhost/api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script: complexScript }),
+      }),
+      { params: Promise.resolve({ id: projectId }) }
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const plan = body.plan;
+
+    // 1. Persisted originalScript is byte-for-byte equal to input
+    expect(plan.originalScript).toBe(complexScript);
+    expect(plan.originalScript.length).toBe(complexScript.length);
+
+    // 2. Reconstructed scene narration equals exact input
+    const fullNarration = plan.scenes.map((s: { text: string }) => s.text).join("");
+    expect(fullNarration).toBe(complexScript);
+
+    // 3. Project.script receives exact input
+    const projectInDb = await prisma.project.findUnique({ where: { id: projectId } });
+    expect(projectInDb?.script).toBe(complexScript);
+
+    // 4. SHA-256 is calculated from exact input
+    const { createHash } = await import("crypto");
+    const expectedHash = createHash("sha256").update(complexScript, "utf8").digest("hex");
+    expect(plan.scriptHash).toBe(expectedHash);
+  });
 });

@@ -284,25 +284,40 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
 
   private async callGeminiApi(prompt: string): Promise<RawDirectorOutput> {
     if (!this.client) {
-      throw new ProviderError(this.id, "Gemini client is uninitialized");
+      throw new ProviderError(this.id, "Gemini client is uninitialized", {
+        code: "AUTH_FAILURE",
+      });
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timerId: NodeJS.Timeout | null = null;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timerId = setTimeout(() => {
+        reject(
+          new ProviderError(this.id, `Gemini request timed out after ${this.timeoutMs}ms`, {
+            code: "TIMEOUT",
+            timeoutMs: this.timeoutMs,
+          })
+        );
+      }, this.timeoutMs);
+    });
+
+    const sdkCallPromise = this.client.models.generateContent({
+      model: this.modelName,
+      contents: prompt,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        responseMimeType: "application/json",
+        responseSchema: DIRECTOR_JSON_SCHEMA as Record<string, unknown>,
+        temperature: 0.2,
+      },
+    });
+
+    // Safely swallow late background rejections from uncompleted sdkCall
+    sdkCallPromise.catch(() => {});
 
     try {
-      const response = await this.client.models.generateContent({
-        model: this.modelName,
-        contents: prompt,
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-          responseMimeType: "application/json",
-          responseSchema: DIRECTOR_JSON_SCHEMA as Record<string, unknown>,
-          temperature: 0.2,
-        },
-      });
-
-      clearTimeout(timer);
+      const response = await Promise.race([sdkCallPromise, timeoutPromise]);
 
       const rawText = response.text?.trim();
       if (!rawText) {
@@ -311,9 +326,12 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         if (finishReason && finishReason !== "STOP") {
           throw new ProviderError(this.id, `Gemini response terminated with reason: ${finishReason}`, {
             finishReason,
+            code: "GENERATION_TERMINATED",
           });
         }
-        throw new ProviderError(this.id, "Gemini returned an empty response");
+        throw new ProviderError(this.id, "Gemini returned an empty response", {
+          code: "EMPTY_RESPONSE",
+        });
       }
 
       let parsedJson: unknown;
@@ -321,7 +339,7 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         parsedJson = JSON.parse(rawText);
       } catch {
         throw new ProviderError(this.id, "Failed to parse Gemini structured JSON response", {
-          rawPreview: rawText.slice(0, 100),
+          code: "MALFORMED_JSON",
         });
       }
 
@@ -331,25 +349,31 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
           (i) => `${i.path.join(".") || "root"}: ${i.message}`
         );
         throw new ProviderError(this.id, "Gemini structured output failed schema validation", {
+          code: "SCHEMA_VALIDATION_FAILED",
           schemaIssues: errorMessages,
         });
       }
 
       return validated.data;
-    } catch (err: unknown) {
-      clearTimeout(timer);
-      if (err instanceof Error && err.name === "AbortError") {
-        throw new ProviderError(this.id, `Gemini request timed out after ${this.timeoutMs}ms`, {
-          timeoutMs: this.timeoutMs,
-        });
+    } finally {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
       }
-      throw err;
     }
   }
 
   private isNonRetryableError(err: unknown): boolean {
-    if (err instanceof ProviderError && !err.message.includes("timed out")) {
-      // Schema validation errors, auth errors, and explicit empty responses shouldn't blindly retry 429 logic
+    if (err instanceof ProviderError) {
+      const code = err.details?.code;
+      if (
+        code === "AUTH_FAILURE" ||
+        code === "SCHEMA_VALIDATION_FAILED" ||
+        code === "MALFORMED_JSON" ||
+        code === "GENERATION_TERMINATED"
+      ) {
+        return true;
+      }
       if (
         err.message.includes("schema validation") ||
         err.message.includes("API key") ||
@@ -370,6 +394,10 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
         message.includes("401") ||
         message.includes("403")
       ) {
+        return true;
+      }
+      // Schema / parsing errors are non-retryable
+      if (message.includes("schema validation") || message.includes("json")) {
         return true;
       }
     }
@@ -402,10 +430,13 @@ export class GeminiDirectorProvider implements DirectorAiProvider {
       if (message.includes("timeout") || err.name === "AbortError") {
         return new ProviderError(this.id, `Gemini request timed out after ${this.timeoutMs}ms`, {
           code: "TIMEOUT",
+          timeoutMs: this.timeoutMs,
         });
       }
 
-      return new ProviderError(this.id, `Gemini request failed: ${err.message}`, {
+      // Redact sensitive details or internal paths
+      const safeMessage = err.message.replace(/key=[^&\s]+/gi, "key=[REDACTED]");
+      return new ProviderError(this.id, `Gemini request failed: ${safeMessage}`, {
         code: "REQUEST_FAILED",
       });
     }

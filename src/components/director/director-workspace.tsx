@@ -51,7 +51,7 @@ export function DirectorWorkspace({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          script: script.trim(),
+          script,
           brandId: selectedBrandId || undefined,
           productId: selectedProductId || undefined,
         }),
