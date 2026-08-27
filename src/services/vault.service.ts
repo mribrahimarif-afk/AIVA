@@ -227,22 +227,70 @@ export function createVaultService(
 
         let createdByThisUpload = false;
         let createdCanonicalAbsPath: string | null = null;
-        let tempCleanupStillFailed = false;
 
         try {
+          // Phase A + Phase B: finalize the blob (2-phase state machine)
           const finalized = await storageService.finalizeBlob(tempPath, checksum, canonicalExtension);
           createdByThisUpload = finalized.createdByThisUpload;
           createdCanonicalAbsPath = finalized.canonicalAbsolutePath;
 
-          // If Phase B temp cleanup failed inside finalizeBlob, perform service-level outer retry
+          // ---------------------------------------------------------------
+          // CRITICAL: If Phase-B temp cleanup failed inside finalizeBlob,
+          // retry cleanup HERE — BEFORE creating any DB records.
+          // This ensures we never commit Asset + return failure.
+          // ---------------------------------------------------------------
           if (finalized.tempCleanupFailed) {
+            let retryCleanupFailed = false;
+            let retryCleanupErrorMessage = "";
             try {
               await storageService.removeTempFile(tempPath);
-            } catch {
-              tempCleanupStillFailed = true;
+            } catch (retryErr) {
+              retryCleanupFailed = true;
+              retryCleanupErrorMessage =
+                retryErr instanceof Error ? retryErr.message : String(retryErr);
             }
+
+            if (retryCleanupFailed) {
+              // Cleanup still failed — do NOT create DB records.
+              // Compensate canonical only if we created it and no ContentBlob exists yet.
+              let canonicalOrphaned = false;
+              if (createdByThisUpload && createdCanonicalAbsPath) {
+                const existingBlob = await blobRepo.findByChecksum(checksum);
+                if (!existingBlob) {
+                  try {
+                    await storageService.compensateCanonicalBlob(createdCanonicalAbsPath);
+                    canonicalOrphaned = false;
+                  } catch (compErr) {
+                    canonicalOrphaned = true;
+                    logger.error({
+                      event: "vault.compensation_failed",
+                      canonicalAbsolutePath: createdCanonicalAbsPath,
+                      error: compErr,
+                      message:
+                        "Failed to compensate canonical file after temp cleanup failure; canonical is orphaned",
+                    });
+                  }
+                }
+                // pre-existing canonical (createdByThisUpload=false) is never removed
+              }
+
+              throw new StorageError(
+                canonicalOrphaned
+                  ? `Upload failed: temp file cleanup failed and canonical file compensation also failed; both files are orphaned`
+                  : `Upload failed: temp file cleanup failed; temp file is orphaned at ${tempPath}`,
+                {
+                  partialUploadOrphaned: true,
+                  tempPath,
+                  canonicalAbsolutePath: createdCanonicalAbsPath,
+                  canonicalOrphaned,
+                  retryCleanupCause: retryCleanupErrorMessage,
+                }
+              );
+            }
+            // Retry succeeded — temp is now clean; continue to persist DB records normally.
           }
 
+          // DB record creation — only reached when temp is confirmed clean
           let blob = await blobRepo.findByChecksum(checksum);
           if (!blob) {
             blob = await blobRepo.create({
@@ -273,20 +321,6 @@ export function createVaultService(
             productId: resolvedProductId,
             blobId: blob.id,
           });
-
-          if (tempCleanupStillFailed) {
-            const msg = createdByThisUpload
-              ? `Canonical file created successfully at ${createdCanonicalAbsPath}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`
-              : `Canonical file already exists at ${createdCanonicalAbsPath}, but temp file cleanup failed; temp file is orphaned at ${tempPath}`;
-
-            throw new StorageError(msg, {
-              canonicalCreated: true,
-              createdByThisUpload,
-              partialUploadOrphaned: true,
-              tempPath,
-              canonicalAbsolutePath: createdCanonicalAbsPath,
-            });
-          }
 
           logger.info({
             event: createdByThisUpload ? "vault.asset_stored" : "vault.duplicate_reused",
@@ -338,7 +372,9 @@ export function createVaultService(
         }
       });
     } catch (primaryErr) {
-      // If processStagedUpload fails at any point after ownership transfer, VaultService cleans up tempPath!
+      // If processStagedUpload fails at any point after ownership transfer, VaultService cleans up tempPath.
+      // Note: If temp was already cleaned (or failed) inside the mutex critical section, removeTempFile
+      // uses fs.rm({ force: true }) which is a no-op when the file doesn't exist — safe to call.
       let cleanupFailed = false;
       let cleanupErrMessage = "";
       try {
