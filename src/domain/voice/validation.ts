@@ -3,6 +3,9 @@ import { VoiceBoundaryDto, VoiceSynthesisResult } from "./voice.types";
 import { ticksToMs } from "./timing";
 
 export const HARD_MAX_AUDIO_BYTES = 104857600; // 100 MB immutable server-side hard maximum
+export const HARD_MAX_DURATION_MS = 3600000; // 1 hour immutable server-side hard maximum
+export const MIN_AUDIO_BYTES = 1024; // 1 KB
+export const MIN_DURATION_MS = 1000; // 1 second
 
 export interface ValidateVoiceSynthesisOptions {
   originalScript: string;
@@ -17,24 +20,66 @@ export interface ValidatedVoiceResult {
 }
 
 /**
+ * Validates and bounds configured maxAudioBytes.
+ * Fails closed on NaN, Infinity, negative, zero, fraction, or non-safe integer values.
+ */
+export function validateMaxAudioBytes(val: unknown): number {
+  if (
+    typeof val !== "number" ||
+    !Number.isFinite(val) ||
+    !Number.isSafeInteger(val) ||
+    val < MIN_AUDIO_BYTES
+  ) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      `Invalid maxAudioBytes limit: must be a positive safe integer of at least ${MIN_AUDIO_BYTES} bytes`
+    );
+  }
+  return Math.min(val, HARD_MAX_AUDIO_BYTES);
+}
+
+/**
+ * Validates and bounds configured maxDurationMs.
+ * Fails closed on NaN, Infinity, negative, zero, fraction, or non-safe integer values.
+ */
+export function validateMaxDurationMs(val: unknown): number {
+  if (
+    typeof val !== "number" ||
+    !Number.isFinite(val) ||
+    !Number.isSafeInteger(val) ||
+    val < MIN_DURATION_MS ||
+    val > HARD_MAX_DURATION_MS
+  ) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      `Invalid maxDurationMs limit: must be a positive safe integer between ${MIN_DURATION_MS} and ${HARD_MAX_DURATION_MS} ms`
+    );
+  }
+  return val;
+}
+
+/**
  * Validates a complete synthesis result from a VoiceProvider against all TASK-004 local invariants.
  *
  * Invariants enforced:
  * 1. audioData is a non-empty Buffer.
  * 2. audioByteCount <= maxAudioBytes (and <= 100MB hard limit).
  * 3. Total duration comes exclusively from synthesis result audioDurationTicks, is finite, > 0, and <= maxDurationMs.
- * 4. Boundaries order is strictly 1..N.
+ * 4. Retained WORD boundaries are filtered and numbered contiguously 1..N.
  * 5. Every boundary source span [sourceStart, sourceEnd) is valid, non-empty, and within originalScript bounds.
  * 6. Transient Azure event.text matches exact originalScript.slice(sourceStart, sourceEnd).
  * 7. Source spans are non-decreasing and non-overlapping.
  * 8. Audio start times are monotonic and within total duration.
- * 9. Word text is reconstructed strictly from originalScript.
+ * 9. Persisted and returned word text is reconstructed strictly from originalScript.
+ * 10. No hostile/raw text, prompt injection, or script text escapes through error messages.
  */
 export function validateVoiceSynthesis(
   result: VoiceSynthesisResult,
   options: ValidateVoiceSynthesisOptions
 ): ValidatedVoiceResult {
-  const { originalScript, maxDurationMs, maxAudioBytes } = options;
+  const { originalScript } = options;
+  const effectiveMaxBytes = validateMaxAudioBytes(options.maxAudioBytes);
+  const effectiveMaxDurationMs = validateMaxDurationMs(options.maxDurationMs);
 
   // 1. Audio data validation
   if (!result.audioData || !Buffer.isBuffer(result.audioData) || result.audioData.length === 0) {
@@ -42,7 +87,6 @@ export function validateVoiceSynthesis(
   }
 
   const audioByteCount = result.audioData.length;
-  const effectiveMaxBytes = Math.min(maxAudioBytes, HARD_MAX_AUDIO_BYTES);
   if (audioByteCount > effectiveMaxBytes) {
     throw new DomainError(
       "AUDIO_TOO_LARGE",
@@ -54,11 +98,12 @@ export function validateVoiceSynthesis(
   if (
     typeof result.audioDurationTicks !== "number" ||
     !Number.isFinite(result.audioDurationTicks) ||
+    !Number.isSafeInteger(result.audioDurationTicks) ||
     result.audioDurationTicks <= 0
   ) {
     throw new DomainError(
       "INVALID_AUDIO_DURATION",
-      `Voice provider returned invalid or non-positive audio duration ticks: ${result.audioDurationTicks}`
+      "Voice provider returned invalid or non-positive audio duration ticks"
     );
   }
 
@@ -70,10 +115,10 @@ export function validateVoiceSynthesis(
     );
   }
 
-  if (durationMs > maxDurationMs) {
+  if (durationMs > effectiveMaxDurationMs) {
     throw new DomainError(
       "INVALID_AUDIO_DURATION",
-      `Voice audio duration (${durationMs} ms) exceeds maximum configured limit (${maxDurationMs} ms)`
+      `Voice audio duration (${durationMs} ms) exceeds maximum configured limit (${effectiveMaxDurationMs} ms)`
     );
   }
 
@@ -83,26 +128,30 @@ export function validateVoiceSynthesis(
   let prevSourceEnd = 0;
   let prevAudioStartMs = 0;
 
-  let i = 0;
-  for (const raw of rawBoundaries) {
-    if (!raw) continue;
-    const order = ++i;
+  // Filter word boundaries first
+  const wordBoundaries = rawBoundaries.filter((raw) => {
+    if (!raw) return false;
+    // Retain only word boundaries
+    return !raw.boundaryType || raw.boundaryType === "Word" || raw.boundaryType === "SpeechSynthesisBoundaryType.Word";
+  });
 
-    // Boundary type filter: word boundaries only
-    if (raw.boundaryType && raw.boundaryType !== "Word" && raw.boundaryType !== "SpeechSynthesisBoundaryType.Word") {
-      continue;
-    }
+  let order = 0;
+  for (const raw of wordBoundaries) {
+    order++;
 
     if (
+      typeof raw.text !== "string" ||
+      raw.text.length === 0 ||
       typeof raw.textOffset !== "number" ||
-      !Number.isInteger(raw.textOffset) ||
+      !Number.isSafeInteger(raw.textOffset) ||
+      raw.textOffset < 0 ||
       typeof raw.wordLength !== "number" ||
-      !Number.isInteger(raw.wordLength) ||
+      !Number.isSafeInteger(raw.wordLength) ||
       raw.wordLength <= 0
     ) {
       throw new DomainError(
         "WORD_BOUNDARY_ALIGNMENT_FAILED",
-        `Boundary ${order} has invalid textOffset (${raw.textOffset}) or wordLength (${raw.wordLength})`
+        `Boundary at index ${order} has invalid textual content, textOffset, or wordLength`
       );
     }
 
@@ -112,7 +161,7 @@ export function validateVoiceSynthesis(
     if (sourceStart < 0 || sourceEnd > originalScript.length || sourceEnd <= sourceStart) {
       throw new DomainError(
         "WORD_BOUNDARY_ALIGNMENT_FAILED",
-        `Boundary ${order} span [${sourceStart}, ${sourceEnd}) is out of bounds for script length ${originalScript.length}`
+        `Boundary at index ${order} span is out of script bounds`
       );
     }
 
@@ -120,19 +169,17 @@ export function validateVoiceSynthesis(
     if (sourceStart < prevSourceEnd) {
       throw new DomainError(
         "WORD_BOUNDARY_ALIGNMENT_FAILED",
-        `Boundary ${order} sourceStart (${sourceStart}) overlaps previous sourceEnd (${prevSourceEnd})`
+        `Boundary at index ${order} overlaps with previous word boundary`
       );
     }
 
     // Exact event.text comparison with authoritative source slice (no broad trimming or mutating)
     const exactSourceSlice = originalScript.slice(sourceStart, sourceEnd);
-    if (typeof raw.text === "string" && raw.text.length > 0) {
-      if (raw.text !== exactSourceSlice) {
-        throw new DomainError(
-          "WORD_BOUNDARY_ALIGNMENT_FAILED",
-          `Boundary ${order} event text mismatch: expected exact source slice '${exactSourceSlice}', received provider text '${raw.text}'`
-        );
-      }
+    if (raw.text !== exactSourceSlice) {
+      throw new DomainError(
+        "WORD_BOUNDARY_ALIGNMENT_FAILED",
+        `Boundary at index ${order} event text does not match exact script slice`
+      );
     }
 
     // Audio timing validation
@@ -142,14 +189,14 @@ export function validateVoiceSynthesis(
     if (audioStartMs < prevAudioStartMs) {
       throw new DomainError(
         "WORD_BOUNDARY_ALIGNMENT_FAILED",
-        `Boundary ${order} audioStartMs (${audioStartMs}) is non-monotonic relative to previous (${prevAudioStartMs})`
+        `Boundary at index ${order} audio start time is non-monotonic`
       );
     }
 
     if (audioStartMs + audioDurationMs > durationMs) {
       throw new DomainError(
         "WORD_BOUNDARY_ALIGNMENT_FAILED",
-        `Boundary ${order} audio end (${audioStartMs + audioDurationMs} ms) exceeds total audio duration (${durationMs} ms)`
+        `Boundary at index ${order} audio end time exceeds total audio duration`
       );
     }
 

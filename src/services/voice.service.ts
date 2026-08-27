@@ -7,6 +7,7 @@ import {
   SUPPORTED_VOICES,
   SupportedVoice,
   VOICE_PROFILES,
+  VOICE_OUTPUT_FORMAT,
   GenerateVoiceInput,
   VoiceTrackDto,
   VoiceTrackWithBoundariesDto,
@@ -109,8 +110,11 @@ export class VoiceService {
       const existingTrack = await this.deps.voiceTrackRepository.getCurrentForProject(projectId);
       if (
         existingTrack &&
+        existingTrack.directorPlanId === directorPlan.id &&
         existingTrack.sourceScriptHash === directorPlan.scriptHash &&
-        existingTrack.voiceName === voiceName
+        existingTrack.voiceName === voiceName &&
+        existingTrack.provider === this.deps.voiceProvider.id &&
+        existingTrack.outputFormat === VOICE_OUTPUT_FORMAT
       ) {
         const fileExists = await this.deps.voiceStorageService.audioFileExists(existingTrack.audioStorageRef);
         if (fileExists) {
@@ -120,6 +124,8 @@ export class VoiceService {
             directorPlanId: directorPlan.id,
             scriptHash: directorPlan.scriptHash,
             voiceName,
+            provider: this.deps.voiceProvider.id,
+            outputFormat: VOICE_OUTPUT_FORMAT,
             storageRef: existingTrack.audioStorageRef,
           });
           return toVoiceTrackDto(existingTrack, directorPlan.scriptHash);

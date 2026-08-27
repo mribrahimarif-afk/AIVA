@@ -16,11 +16,33 @@ export interface PublishAudioResult {
   newlyCreated: boolean;
 }
 
+export interface VoiceStorageFsOps {
+  link?: typeof fs.promises.link;
+  copyFile?: typeof fs.promises.copyFile;
+  unlink?: typeof fs.promises.unlink;
+  writeFile?: typeof fs.promises.writeFile;
+  mkdir?: typeof fs.promises.mkdir;
+}
+
 export class VoiceStorageService {
+  private readonly linkFn: typeof fs.promises.link;
+  private readonly copyFileFn: typeof fs.promises.copyFile;
+  private readonly unlinkFn: typeof fs.promises.unlink;
+  private readonly writeFileFn: typeof fs.promises.writeFile;
+  private readonly mkdirFn: typeof fs.promises.mkdir;
+
+  constructor(fsOps?: VoiceStorageFsOps) {
+    this.linkFn = fsOps?.link ?? fs.promises.link;
+    this.copyFileFn = fsOps?.copyFile ?? fs.promises.copyFile;
+    this.unlinkFn = fsOps?.unlink ?? fs.promises.unlink;
+    this.writeFileFn = fsOps?.writeFile ?? fs.promises.writeFile;
+    this.mkdirFn = fsOps?.mkdir ?? fs.promises.mkdir;
+  }
+
   /**
    * Stages a complete audio buffer to a temporary file on the storage volume
    * and atomically publishes it to the content-addressed project audio directory
-   * using an exclusive no-clobber primitive (fs.promises.link or COPYFILE_EXCL fallback).
+   * using an exclusive no-clobber primitive (fs.promises.link with same-volume dest temp fallback).
    */
   async stageAndPublishAudio(audioData: Buffer, projectId: string): Promise<PublishAudioResult> {
     if (!audioData || audioData.length === 0) {
@@ -32,16 +54,16 @@ export class VoiceStorageService {
 
     // 1. Ensure temp and target directories exist under storage root
     const tempRoot = getTempRoot();
-    await fs.promises.mkdir(tempRoot, { recursive: true });
+    await this.mkdirFn(tempRoot, { recursive: true });
 
     const projectAudioDir = getProjectSubdirPath(projectId, "audio");
-    await fs.promises.mkdir(projectAudioDir, { recursive: true });
+    await this.mkdirFn(projectAudioDir, { recursive: true });
 
-    // 2. Write completely flushed temp file on same volume
+    // 2. Write completely flushed temp file
     const tempFileName = `voice-stage-${crypto.randomUUID()}.wav`;
     const tempFilePath = path.join(tempRoot, tempFileName);
 
-    await fs.promises.writeFile(tempFilePath, audioData);
+    await this.writeFileFn(tempFilePath, audioData);
 
     // 3. Define target content-addressed path
     const targetFileName = `${audioSha256}.wav`;
@@ -50,10 +72,12 @@ export class VoiceStorageService {
 
     // 4. Atomic exclusive publication
     let newlyCreated = false;
+    let destTempFilePath: string | undefined;
+
     try {
       try {
-        // Primary: atomic hard-link publication on the same volume
-        await fs.promises.link(tempFilePath, targetFilePath);
+        // Primary: atomic hard-link publication from tempRoot to destination
+        await this.linkFn(tempFilePath, targetFilePath);
         newlyCreated = true;
       } catch (linkErr: unknown) {
         const err = linkErr as NodeJS.ErrnoException;
@@ -61,16 +85,23 @@ export class VoiceStorageService {
           // File already exists — another operation or prior run created it
           newlyCreated = false;
         } else if (err.code === "EXDEV" || err.code === "EPERM") {
-          // Fallback for filesystems that reject hardlinks: atomic exclusive copy
+          // Fallback for cross-device/partition links:
+          // 1. Create a unique temporary filename inside the destination audio directory
+          destTempFilePath = path.join(projectAudioDir, `.tmp-${crypto.randomUUID()}.wav`);
+          // 2. Copy the fully-written source temp WAV into destination-directory temp file
+          await this.copyFileFn(tempFilePath, destTempFilePath);
+          // 3. Publish that fully-written destination temp into canonical path via atomic link
           try {
-            await fs.promises.copyFile(tempFilePath, targetFilePath, fs.constants.COPYFILE_EXCL);
+            await this.linkFn(destTempFilePath, targetFilePath);
             newlyCreated = true;
-          } catch (copyErr: unknown) {
-            const cErr = copyErr as NodeJS.ErrnoException;
-            if (cErr.code === "EEXIST") {
+          } catch (destLinkErr: unknown) {
+            const dErr = destLinkErr as NodeJS.ErrnoException;
+            if (dErr.code === "EEXIST") {
               newlyCreated = false;
             } else {
-              throw copyErr;
+              throw new StorageError("Atomic no-clobber publication unavailable on destination filesystem", {
+                cause: destLinkErr,
+              });
             }
           }
         } else {
@@ -78,11 +109,18 @@ export class VoiceStorageService {
         }
       }
     } finally {
-      // 5. Always clean temporary file
+      // 5. Always clean operation-owned temporary files
+      if (destTempFilePath) {
+        try {
+          await this.unlinkFn(destTempFilePath);
+        } catch {
+          // Ignore unlink error for destination temp file if already cleaned
+        }
+      }
       try {
-        await fs.promises.unlink(tempFilePath);
+        await this.unlinkFn(tempFilePath);
       } catch {
-        // Ignore unlink error for temp file if already cleaned
+        // Ignore unlink error for source temp file if already cleaned
       }
     }
 

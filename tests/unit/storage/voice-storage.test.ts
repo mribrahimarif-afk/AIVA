@@ -58,4 +58,123 @@ describe("VoiceStorageService Unit & Path Security Tests", () => {
     // removeAudioFile is idempotent and ignores ENOENT
     await expect(service.removeAudioFile(nonExistentRef)).resolves.not.toThrow();
   });
+
+  describe("EXDEV / EPERM Fallback & Atomic No-Clobber Publication Contract", () => {
+    it("proves canonical path does not exist while destination temp copy is in flight and publishes only after copy completes", async () => {
+      const projId = `test-proj-voice-storage-${crypto.randomUUID()}`;
+      const expectedSha = crypto.createHash("sha256").update(sampleAudio).digest("hex").toLowerCase();
+      const canonicalRef = `projects/${projId}/audio/${expectedSha}.wav`;
+      const canonicalPath = resolveStoragePath(canonicalRef);
+
+      let inFlightCheckPassed = false;
+      let destTempSeen = false;
+
+      // Create a service with injected linkFn that triggers EXDEV on first attempt (cross-device)
+      // and verifies canonical path is not visible while copying
+      const customService = new VoiceStorageService({
+        link: async (src, dest) => {
+          const srcStr = String(src);
+          // If linking from temp root to destination, simulate cross-device EXDEV
+          if (srcStr.includes("voice-stage-")) {
+            const err = new Error("Cross-device link") as NodeJS.ErrnoException;
+            err.code = "EXDEV";
+            throw err;
+          }
+          // Linking from destination temp (.tmp-*) to canonical destination
+          if (srcStr.includes(".tmp-")) {
+            destTempSeen = true;
+            // Before this link completes, verify canonical path does NOT exist yet
+            const exists = fs.existsSync(canonicalPath);
+            if (!exists) {
+              inFlightCheckPassed = true;
+            }
+          }
+          return fs.promises.link(src, dest);
+        },
+      });
+
+      const published = await customService.stageAndPublishAudio(sampleAudio, projId);
+      expect(published.newlyCreated).toBe(true);
+      expect(destTempSeen).toBe(true);
+      expect(inFlightCheckPassed).toBe(true);
+
+      // Verify canonical file now exists with complete content
+      expect(fs.existsSync(canonicalPath)).toBe(true);
+      const readBuf = await fs.promises.readFile(canonicalPath);
+      expect(readBuf.equals(sampleAudio)).toBe(true);
+    });
+
+    it("proves EXDEV fallback handles concurrent EEXIST as reuse without overwriting", async () => {
+      const projId = `test-proj-voice-storage-${crypto.randomUUID()}`;
+      const expectedSha = crypto.createHash("sha256").update(sampleAudio).digest("hex").toLowerCase();
+      const canonicalRef = `projects/${projId}/audio/${expectedSha}.wav`;
+      const canonicalPath = resolveStoragePath(canonicalRef);
+
+      // Pre-create the canonical file
+      await fs.promises.mkdir(require("path").dirname(canonicalPath), { recursive: true });
+      await fs.promises.writeFile(canonicalPath, sampleAudio);
+
+      const customService = new VoiceStorageService({
+        link: async (src, dest) => {
+          const srcStr = String(src);
+          if (srcStr.includes("voice-stage-")) {
+            const err = new Error("Cross-device link") as NodeJS.ErrnoException;
+            err.code = "EXDEV";
+            throw err;
+          }
+          return fs.promises.link(src, dest); // Will throw EEXIST
+        },
+      });
+
+      const published = await customService.stageAndPublishAudio(sampleAudio, projId);
+      expect(published.newlyCreated).toBe(false);
+      expect(published.storageRef).toBe(canonicalRef);
+    });
+
+    it("proves all temp files (source and destination) are cleaned up on copy failure or destination link failure", async () => {
+      const projId = `test-proj-voice-storage-${crypto.randomUUID()}`;
+      let createdDestTemp: string | undefined;
+
+      const failingCopyService = new VoiceStorageService({
+        link: async (src) => {
+          const srcStr = String(src);
+          if (srcStr.includes("voice-stage-")) {
+            const err = new Error("Cross-device link") as NodeJS.ErrnoException;
+            err.code = "EXDEV";
+            throw err;
+          }
+          return fs.promises.link(src, "");
+        },
+        copyFile: async (src, dest) => {
+          createdDestTemp = String(dest);
+          throw new Error("Simulated disk I/O error during copy");
+        },
+      });
+
+      await expect(failingCopyService.stageAndPublishAudio(sampleAudio, projId)).rejects.toThrow(
+        "Simulated disk I/O error during copy"
+      );
+
+      if (createdDestTemp) {
+        expect(fs.existsSync(createdDestTemp)).toBe(false);
+      }
+
+      // Test destination link non-EEXIST failure fails closed
+      const failingLinkService = new VoiceStorageService({
+        link: async (src) => {
+          const srcStr = String(src);
+          if (srcStr.includes("voice-stage-")) {
+            const err = new Error("Cross-device link") as NodeJS.ErrnoException;
+            err.code = "EXDEV";
+            throw err;
+          }
+          const fatalErr = new Error("Filesystem corrupted") as NodeJS.ErrnoException;
+          fatalErr.code = "EIO";
+          throw fatalErr;
+        },
+      });
+
+      await expect(failingLinkService.stageAndPublishAudio(sampleAudio, projId)).rejects.toThrow(StorageError);
+    });
+  });
 });

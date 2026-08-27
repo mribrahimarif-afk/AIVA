@@ -282,4 +282,81 @@ describe("VoiceService Integration & Atomicity Tests", () => {
     expect(loadedTrack!.state).toBe("STALE");
     expect(loadedTrack!.sourceScriptHash).toBe(script1Hash);
   });
+
+  describe("Idempotent Reuse Contract Guard Tests", () => {
+    it("proves regeneration occurs when provider, outputFormat, voice, or audio file missing differs", async () => {
+      const script = "Strict contract variation test script.";
+      const scriptHash = crypto.createHash("sha256").update(script).digest("hex").toLowerCase();
+
+      const project = await projectRepo.create({
+        name: "Reuse Contract Test Project",
+        aspectRatio: "9:16",
+        script,
+      });
+
+      const plan = await directorPlanRepo.replacePlan(
+        project.id,
+        {
+          projectId: project.id,
+          originalScript: script,
+          scriptHash,
+          unitizerVersion: "unitizer-v1",
+          schemaVersion: "director-v1",
+          promptVersion: "director-v1",
+          model: "gemini-3.7-flash",
+          language: "ENGLISH",
+          contentType: "ADVERTISEMENT",
+          summary: "Contract summary",
+          creativeDirection: "Contract direction",
+        },
+        []
+      );
+
+      let synthesisCount = 0;
+      const fakeProvider = new FakeVoiceProvider({
+        isConfigured: true,
+        onSynthesize: () => {
+          synthesisCount++;
+        },
+      });
+
+      const testService = new VoiceService({
+        projectRepository: projectRepo,
+        directorPlanRepository: directorPlanRepo,
+        voiceTrackRepository: voiceTrackRepo,
+        voiceProvider: fakeProvider,
+        voiceStorageService,
+      });
+
+      // Initial generation
+      const t1 = await testService.generateVoice(project.id, { voiceName: "ur-PK-AsadNeural" });
+      expect(synthesisCount).toBe(1);
+
+      // Case 1: Different voice requested -> must synthesize
+      await testService.generateVoice(project.id, { voiceName: "ur-PK-UzmaNeural" });
+      expect(synthesisCount).toBe(2);
+
+      // Case 2: Audio file deleted from disk -> must synthesize even with identical parameters
+      await voiceStorageService.removeAudioFile(t1.audioStorageRef);
+      await testService.generateVoice(project.id, { voiceName: "ur-PK-UzmaNeural" });
+      expect(synthesisCount).toBe(3);
+
+      // Case 3: Provider mismatch in DB -> must synthesize
+      // Manually mutate existing track in DB to have different provider
+      await prisma.voiceTrack.update({
+        where: { id: (await voiceTrackRepo.getCurrentForProject(project.id))!.id },
+        data: { provider: "different-provider-id" },
+      });
+      await testService.generateVoice(project.id, { voiceName: "ur-PK-UzmaNeural" });
+      expect(synthesisCount).toBe(4);
+
+      // Case 4: OutputFormat mismatch in DB -> must synthesize
+      await prisma.voiceTrack.update({
+        where: { id: (await voiceTrackRepo.getCurrentForProject(project.id))!.id },
+        data: { outputFormat: "Riff16Khz16BitMonoPcm" },
+      });
+      await testService.generateVoice(project.id, { voiceName: "ur-PK-UzmaNeural" });
+      expect(synthesisCount).toBe(5);
+    });
+  });
 });

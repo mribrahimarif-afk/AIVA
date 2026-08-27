@@ -43,6 +43,21 @@ function sanitizeVoiceDetailCode(code: unknown): string {
   return "REQUEST_FAILED";
 }
 
+export function validateSynthesisTimeoutMs(val: unknown): number {
+  if (
+    typeof val !== "number" ||
+    !Number.isFinite(val) ||
+    !Number.isSafeInteger(val) ||
+    val < 5000 ||
+    val > 300000
+  ) {
+    throw new ProviderError("azure-speech", "Invalid synthesis timeout configuration", {
+      code: "REQUEST_FAILED",
+    });
+  }
+  return val;
+}
+
 export class AzureVoiceProvider implements VoiceProvider {
   readonly id = "azure-speech";
   readonly defaultVoice: SupportedVoice;
@@ -54,7 +69,9 @@ export class AzureVoiceProvider implements VoiceProvider {
     const env = getEnv();
     this.apiKey = config?.apiKey ?? env.AZURE_SPEECH_KEY ?? "";
     this.region = config?.region ?? env.AZURE_SPEECH_REGION ?? "";
-    this.timeoutMs = config?.timeoutMs ?? env.VOICE_SYNTHESIS_TIMEOUT_MS;
+
+    const rawTimeout = config?.timeoutMs !== undefined ? config.timeoutMs : env.VOICE_SYNTHESIS_TIMEOUT_MS;
+    this.timeoutMs = validateSynthesisTimeoutMs(rawTimeout);
 
     const configuredVoice = config?.defaultVoice ?? (env.AZURE_SPEECH_VOICE as SupportedVoice);
     this.defaultVoice = (SUPPORTED_VOICES as readonly string[]).includes(configuredVoice)
@@ -82,7 +99,7 @@ export class AzureVoiceProvider implements VoiceProvider {
     }
 
     if (!(SUPPORTED_VOICES as readonly string[]).includes(voiceName)) {
-      throw new ProviderError(this.id, `Unsupported voice: ${voiceName}`, {
+      throw new ProviderError(this.id, `Unsupported voice profile`, {
         code: "INVALID_VOICE",
       });
     }
@@ -97,11 +114,11 @@ export class AzureVoiceProvider implements VoiceProvider {
     const boundaries: RawVoiceBoundary[] = [];
 
     synthesizer.wordBoundary = (_sender, event) => {
-      // Capture word boundary events
+      // Capture word boundary events using exact SDK enum comparison only
       if (
-        event.boundaryType === sdk.SpeechSynthesisBoundaryType.Word ||
-        event.boundaryType === (sdk.SpeechSynthesisBoundaryType as unknown as { Word: string }).Word ||
-        String(event.boundaryType).toLowerCase().includes("word")
+        event.boundaryType === sdk.SpeechSynthesisBoundaryType.Word &&
+        typeof event.text === "string" &&
+        event.text.length > 0
       ) {
         boundaries.push({
           text: event.text,

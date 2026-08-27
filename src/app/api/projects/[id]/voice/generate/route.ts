@@ -24,9 +24,12 @@ export async function POST(request: Request, { params }: RouteParams): Promise<N
 
     const parsed = generateVoiceSchema.safeParse(body);
     if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      throw new ValidationError(issue?.message ?? "Invalid voice generation input", {
-        issues: parsed.error.issues,
+      const sanitizedIssues = parsed.error.issues.map((issue) => ({
+        field: issue.path.join(".") || "voiceName",
+        message: issue.message,
+      }));
+      throw new ValidationError("Invalid voice generation input", {
+        issues: sanitizedIssues,
       });
     }
 

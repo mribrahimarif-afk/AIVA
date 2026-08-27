@@ -112,7 +112,7 @@ describe("Voice Synthesis Validation & Invariants Tests", () => {
     try {
       validateVoiceSynthesis(
         {
-          audioData: Buffer.alloc(500),
+          audioData: Buffer.alloc(5000),
           audioDurationTicks: 10000000,
           voiceName: "ur-PK-AsadNeural",
           outputFormat: "Riff24Khz16BitMonoPcm",
@@ -120,7 +120,7 @@ describe("Voice Synthesis Validation & Invariants Tests", () => {
         },
         {
           ...defaultOptions,
-          maxAudioBytes: 250, // max is 250 bytes
+          maxAudioBytes: 2048, // max is 2048 bytes (>= 1024 min)
         }
       );
       expect.unreachable();
@@ -364,5 +364,124 @@ describe("Voice Synthesis Validation & Invariants Tests", () => {
       expect(err).toBeInstanceOf(DomainError);
       expect((err as DomainError).code).toBe("WORD_BOUNDARY_ALIGNMENT_FAILED");
     }
+  });
+
+  describe("Fail-Closed Resource Limits & Boundary Filtering", () => {
+    it("fails closed when maxAudioBytes is NaN, Infinity, negative, zero, fraction, or non-safe integer", () => {
+      const invalidValues = [NaN, Infinity, -Infinity, 0, -500, 2.5, 500, Number.MAX_SAFE_INTEGER + 10];
+      for (const val of invalidValues) {
+        expect(() =>
+          validateVoiceSynthesis(
+            {
+              audioData: validBuffer,
+              audioDurationTicks: 10000000,
+              voiceName: "ur-PK-AsadNeural",
+              outputFormat: "Riff24Khz16BitMonoPcm",
+              boundaries: [],
+            },
+            {
+              ...defaultOptions,
+              maxAudioBytes: val as number,
+            }
+          )
+        ).toThrow(DomainError);
+      }
+    });
+
+    it("fails closed when maxDurationMs is NaN, Infinity, negative, zero, fraction, or above hard limit", () => {
+      const invalidValues = [NaN, Infinity, -Infinity, 0, -1000, 1.5, 500, 999999999, Number.MAX_SAFE_INTEGER + 10];
+      for (const val of invalidValues) {
+        expect(() =>
+          validateVoiceSynthesis(
+            {
+              audioData: validBuffer,
+              audioDurationTicks: 10000000,
+              voiceName: "ur-PK-AsadNeural",
+              outputFormat: "Riff24Khz16BitMonoPcm",
+              boundaries: [],
+            },
+            {
+              ...defaultOptions,
+              maxDurationMs: val as number,
+            }
+          )
+        ).toThrow(DomainError);
+      }
+    });
+
+    it("filters out non-Word boundaries and numbers retained Word boundaries strictly contiguously (1..N)", () => {
+      const result: VoiceSynthesisResult = {
+        audioData: validBuffer,
+        audioDurationTicks: 25000000, // 2500 ms
+        voiceName: "ur-PK-AsadNeural",
+        outputFormat: "Riff24Khz16BitMonoPcm",
+        boundaries: [
+          {
+            text: "Hello",
+            textOffset: 0,
+            wordLength: 5,
+            audioOffsetTicks: 1000000,
+            durationTicks: 4000000,
+            boundaryType: "Word",
+          },
+          {
+            text: " ",
+            textOffset: 5,
+            wordLength: 1,
+            audioOffsetTicks: 5000000,
+            durationTicks: 1000000,
+            boundaryType: "Punctuation" as never, // Non-word boundary
+          },
+          {
+            text: "world",
+            textOffset: 6,
+            wordLength: 5,
+            audioOffsetTicks: 6000000,
+            durationTicks: 5000000,
+            boundaryType: "Word",
+          },
+        ],
+      };
+
+      const validated = validateVoiceSynthesis(result, defaultOptions);
+      expect(validated.boundaries).toHaveLength(2);
+      expect(validated.boundaries[0]?.order).toBe(1);
+      expect(validated.boundaries[0]?.text).toBe("Hello");
+      expect(validated.boundaries[1]?.order).toBe(2);
+      expect(validated.boundaries[1]?.text).toBe("world");
+    });
+
+    it("sanitizes error messages so no hostile prompt-injection or raw script text leaks", () => {
+      const hostileScript = "CANARY_SECRET_TOKEN_DO_NOT_LEAK";
+      const hostileResult: VoiceSynthesisResult = {
+        audioData: validBuffer,
+        audioDurationTicks: 10000000,
+        voiceName: "ur-PK-AsadNeural",
+        outputFormat: "Riff24Khz16BitMonoPcm",
+        boundaries: [
+          {
+            text: "HOSTILE_MISMATCH_TEXT_TOKEN",
+            textOffset: 0,
+            wordLength: hostileScript.length,
+            audioOffsetTicks: 1000000,
+            durationTicks: 2000000,
+            boundaryType: "Word",
+          },
+        ],
+      };
+
+      try {
+        validateVoiceSynthesis(hostileResult, {
+          ...defaultOptions,
+          originalScript: hostileScript,
+        });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(DomainError);
+        const domainErr = err as DomainError;
+        expect(domainErr.message).not.toContain("CANARY_SECRET_TOKEN_DO_NOT_LEAK");
+        expect(domainErr.message).not.toContain("HOSTILE_MISMATCH_TEXT_TOKEN");
+      }
+    });
   });
 });

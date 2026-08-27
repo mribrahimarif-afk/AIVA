@@ -142,29 +142,37 @@ describe("AzureVoiceProvider Unit & Security Tests", () => {
   });
 
   it("times out and cancels synthesis when Azure execution exceeds timeoutMs", async () => {
-    const provider = new AzureVoiceProvider({
-      apiKey: secretKey,
-      region: secretRegion,
-      timeoutMs: 50, // 50ms timeout for test
-    });
-
-    const closeSpy = vi.spyOn(sdk.SpeechSynthesizer.prototype, "close");
-
-    vi.spyOn(sdk.SpeechSynthesizer.prototype, "speakTextAsync").mockImplementation(
-      () => {
-        // intentionally hang without calling callbacks
-      }
-    );
-
+    vi.useFakeTimers();
     try {
-      await provider.synthesize({ text: "Hello" });
-      expect.unreachable();
-    } catch (err: unknown) {
-      expect(err).toBeInstanceOf(ProviderError);
-      const pe = err as ProviderError;
+      const provider = new AzureVoiceProvider({
+        apiKey: secretKey,
+        region: secretRegion,
+        timeoutMs: 5000, // Valid bound >= 5000
+      });
+
+      const closeSpy = vi.spyOn(sdk.SpeechSynthesizer.prototype, "close");
+
+      vi.spyOn(sdk.SpeechSynthesizer.prototype, "speakTextAsync").mockImplementation(
+        () => {
+          // intentionally hang without calling callbacks
+        }
+      );
+
+      let caughtErr: unknown = null;
+      const promise = provider.synthesize({ text: "Hello" }).catch((err) => {
+        caughtErr = err;
+      });
+
+      await vi.advanceTimersByTimeAsync(5001);
+      await promise;
+
+      expect(caughtErr).toBeInstanceOf(ProviderError);
+      const pe = caughtErr as ProviderError;
       expect(pe.details?.code).toBe("TIMEOUT");
-      expect(pe.details?.timeoutMs).toBe(50);
+      expect(pe.details?.timeoutMs).toBe(5000);
       expect(closeSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -203,5 +211,110 @@ describe("AzureVoiceProvider Unit & Security Tests", () => {
     expect(result.audioDurationTicks).toBe(25000000);
     expect(result.boundaries).toHaveLength(1);
     expect(result.boundaries[0]?.text).toBe("Hello");
+  });
+
+  describe("Fail-Closed Timeout Validation & Enum Boundary Filtering", () => {
+    it("fails closed when timeoutMs is NaN, Infinity, negative, zero, fraction, or out of bounds", () => {
+      const invalidTimeouts = [NaN, Infinity, -Infinity, 0, -5000, 2.5, 1000, 999999999];
+      for (const t of invalidTimeouts) {
+        expect(() => {
+          new AzureVoiceProvider({
+            apiKey: secretKey,
+            region: secretRegion,
+            timeoutMs: t as number,
+          });
+        }).toThrow(ProviderError);
+      }
+    });
+
+    it("strictly accepts only SpeechSynthesisBoundaryType.Word and ignores non-Word boundary events", async () => {
+      const provider = new AzureVoiceProvider({
+        apiKey: secretKey,
+        region: secretRegion,
+        timeoutMs: 10000,
+      });
+
+      const fakeAudioData = new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0]).buffer;
+
+      vi.spyOn(sdk.SpeechSynthesizer.prototype, "speakTextAsync").mockImplementation(
+        function (this: sdk.SpeechSynthesizer, _text, cb) {
+          if (this.wordBoundary) {
+            // Send Word event
+            this.wordBoundary(this, {
+              boundaryType: sdk.SpeechSynthesisBoundaryType.Word,
+              text: "Hello",
+              textOffset: 0,
+              wordLength: 5,
+              audioOffset: 1000000,
+              duration: 4000000,
+            } as unknown as sdk.SpeechSynthesisWordBoundaryEventArgs);
+
+            // Send non-Word event (Sentence)
+            this.wordBoundary(this, {
+              boundaryType: sdk.SpeechSynthesisBoundaryType.Sentence,
+              text: "Hello world.",
+              textOffset: 0,
+              wordLength: 12,
+              audioOffset: 1000000,
+              duration: 8000000,
+            } as unknown as sdk.SpeechSynthesisWordBoundaryEventArgs);
+
+            // Send non-Word event (Punctuation)
+            this.wordBoundary(this, {
+              boundaryType: sdk.SpeechSynthesisBoundaryType.Punctuation,
+              text: ".",
+              textOffset: 11,
+              wordLength: 1,
+              audioOffset: 7000000,
+              duration: 1000000,
+            } as unknown as sdk.SpeechSynthesisWordBoundaryEventArgs);
+          }
+
+          const fakeResult = {
+            reason: sdk.ResultReason.SynthesizingAudioCompleted,
+            audioData: fakeAudioData,
+            audioDuration: 25000000,
+          };
+          if (cb) cb(fakeResult as unknown as sdk.SpeechSynthesisResult);
+        }
+      );
+
+      const result = await provider.synthesize({ text: "Hello world." });
+      // Only the Word boundary should have been retained
+      expect(result.boundaries).toHaveLength(1);
+      expect(result.boundaries[0]?.text).toBe("Hello");
+      expect(result.boundaries[0]?.boundaryType).toBe("Word");
+    });
+
+    it("redacts hostile canaries, file paths, authorization text, and secrets from upstream errors", async () => {
+      const provider = new AzureVoiceProvider({
+        apiKey: secretKey,
+        region: secretRegion,
+        timeoutMs: 10000,
+      });
+
+      const canary = "SECRET_CANARY_BEARER_TOKEN_999";
+      const hostilePath = "/var/secrets/azure_credentials.json";
+
+      vi.spyOn(sdk.SpeechSynthesizer.prototype, "speakTextAsync").mockImplementation(
+        (_text, _cb, errCb) => {
+          if (errCb) {
+            errCb(`Fatal upstream error at ${hostilePath} with header Authorization: Bearer ${canary}`);
+          }
+        }
+      );
+
+      try {
+        await provider.synthesize({ text: "Hello" });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(ProviderError);
+        const pe = err as ProviderError;
+        expect(pe.message).not.toContain(canary);
+        expect(pe.message).not.toContain(hostilePath);
+        expect(JSON.stringify(pe.details)).not.toContain(canary);
+        expect(JSON.stringify(pe.details)).not.toContain(hostilePath);
+      }
+    });
   });
 });
