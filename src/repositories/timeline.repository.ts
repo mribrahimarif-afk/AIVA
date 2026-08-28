@@ -5,12 +5,8 @@ type TimelineRow = Timeline & { scenes: TimelineScene[] };
 function map(row: TimelineRow): TimelineDto { return { ...row, timingSourceType: row.timingSourceType as TimingSourceType, scenes: row.scenes.map((scene) => ({ ...scene })) }; }
 export function createTimelineRepository(db: PrismaClient) {
   return {
-    async findByIdentity(directorPlanId: string, timingSourceType: TimingSourceType, timingSourceId: string) {
-      const row = await db.timeline.findUnique({ where: { directorPlanId_timingSourceType_timingSourceId: { directorPlanId, timingSourceType, timingSourceId } }, include: { scenes: { orderBy: { sequence: "asc" } } } });
-      return row ? map(row) : null;
-    },
-    async findCurrent(projectId: string, directorPlanId: string) {
-      const row = await db.timeline.findFirst({ where: { projectId, directorPlanId }, orderBy: { createdAt: "desc" }, include: { scenes: { orderBy: { sequence: "asc" } } } });
+    async findByIdentity(projectId: string, directorPlanId: string, timingSourceType: TimingSourceType, timingSourceId: string) {
+      const row = await db.timeline.findFirst({ where: { projectId, directorPlanId, timingSourceType, timingSourceId }, include: { scenes: { orderBy: { sequence: "asc" } } } });
       return row ? map(row) : null;
     },
     async create(data: { projectId: string; directorPlanId: string; timingSourceType: TimingSourceType; timingSourceId: string; totalDurationMs: number; scenes: TimelineSceneDto[] }) {
