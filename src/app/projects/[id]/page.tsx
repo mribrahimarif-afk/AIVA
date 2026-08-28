@@ -92,21 +92,26 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
       />
 
       {/* AIVA Voice Workspace */}
-      <VoiceWorkspace
-        projectId={id}
-        hasDirectorPlan={Boolean(plan)}
-        directorScriptHash={plan?.scriptHash}
-        initialVoiceTrack={voiceTrack}
-        isConfigured={isAzureConfigured}
-        azureConfigured={isAzureConfigured}
-        elevenLabsConfigured={isElevenLabsConfigured}
-        defaultVoice={voiceProvider.defaultVoice}
-        defaultAzureVoice={azureVoiceProvider.defaultVoice}
-        defaultElevenLabsVoice={elevenLabsVoiceProvider.defaultVoice}
-        supportedVoices={Object.values(VOICE_PROFILES)}
-        azureVoices={Object.values(VOICE_PROFILES)}
-        elevenLabsVoices={elevenLabsVoices}
-      />
+      {(() => {
+        const isPlanUsable = plan ? (plan.sourceType === "AUDIO_TRANSCRIPT" ? Boolean(plan.isCurrent) : true) : false;
+        return (
+          <VoiceWorkspace
+            projectId={id}
+            hasDirectorPlan={isPlanUsable}
+            directorScriptHash={isPlanUsable ? plan?.scriptHash : undefined}
+            initialVoiceTrack={voiceTrack}
+            isConfigured={isAzureConfigured}
+            azureConfigured={isAzureConfigured}
+            elevenLabsConfigured={isElevenLabsConfigured}
+            defaultVoice={voiceProvider.defaultVoice}
+            defaultAzureVoice={azureVoiceProvider.defaultVoice}
+            defaultElevenLabsVoice={elevenLabsVoiceProvider.defaultVoice}
+            supportedVoices={Object.values(VOICE_PROFILES)}
+            azureVoices={Object.values(VOICE_PROFILES)}
+            elevenLabsVoices={elevenLabsVoices}
+          />
+        );
+      })()}
     </div>
   );
 }

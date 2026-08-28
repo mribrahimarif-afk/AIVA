@@ -12,6 +12,7 @@ import type {
   TranscriptionProvider,
 } from "./transcription-provider.interface";
 import type { Logger } from "@/infrastructure/logging/logger";
+import { normalizeProviderError } from "./provider-error-normalizer";
 
 export interface GeminiTranscribeProviderOptions {
   apiKey?: string;
@@ -19,24 +20,26 @@ export interface GeminiTranscribeProviderOptions {
   timeoutMs?: number;
   logger?: Logger;
   genAiClient?: GoogleGenAI;
+  fetchFn?: typeof fetch;
 }
 
 /**
- * Strips secrets, file paths, and raw JSON bodies from provider error messages.
+ * Parses fractional timestamp strings like "0.100s", "1.250s", "62.003s" or numeric seconds into milliseconds.
  */
-function sanitizeErrorMessage(rawMessage: string): string {
-  let msg = rawMessage;
-  // Strip API keys
-  msg = msg.replace(/\b(?:AIza|sk-|ghp_|AKIA|xoxb)[A-Za-z0-9\-_]{8,}\b/g, "[REDACTED]");
-  msg = msg.replace(/((?:api[-_]?key|key|secret|token)\s*[:=]\s*)([^\s"'&,;]+)/gi, "$1[REDACTED]");
-  // Strip local absolute file paths (Windows & POSIX)
-  msg = msg.replace(/[A-Za-z]:\\[^:\s"'<>]+\.[A-Za-z0-9]+/g, "[FILE_PATH]");
-  msg = msg.replace(/\/(?:[a-zA-Z0-9._-]+\/)+[a-zA-Z0-9._-]+\.[A-Za-z0-9]+/g, "[FILE_PATH]");
-  // Truncate long raw json payloads
-  if (msg.length > 250) {
-    msg = msg.substring(0, 250) + "...";
+function parseTimestampOffsetToMs(offset: unknown): number | null {
+  if (typeof offset === "number" && !isNaN(offset)) {
+    return Math.round(offset * 1000);
   }
-  return msg;
+  if (typeof offset === "string") {
+    const trimmed = offset.trim();
+    if (trimmed.endsWith("s")) {
+      const num = parseFloat(trimmed.slice(0, -1));
+      if (!isNaN(num)) return Math.round(num * 1000);
+    }
+    const num = parseFloat(trimmed);
+    if (!isNaN(num)) return Math.round(num * 1000);
+  }
+  return null;
 }
 
 export class GeminiTranscribeProvider implements TranscriptionProvider {
@@ -46,17 +49,17 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
   private readonly timeoutMs: number;
   private readonly logger?: Logger;
   private readonly client: GoogleGenAI | null = null;
+  private readonly fetchFn: typeof fetch;
 
   constructor(options: GeminiTranscribeProviderOptions = {}) {
     this.apiKey = options.apiKey !== undefined ? options.apiKey : (process.env.GEMINI_API_KEY || "");
     this.modelName = options.model || process.env.GEMINI_TRANSCRIBE_MODEL || "gemini-3.5-transcribe";
     this.timeoutMs = options.timeoutMs || 45000;
     this.logger = options.logger;
+    this.fetchFn = options.fetchFn ?? globalThis.fetch;
 
     if (options.genAiClient) {
       this.client = options.genAiClient;
-    } else if (this.apiKey.trim().length > 0) {
-      this.client = new GoogleGenAI({ apiKey: this.apiKey.trim() });
     }
   }
 
@@ -65,200 +68,294 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
   }
 
   async transcribe(input: TranscriptionInput): Promise<TranscriptionResult> {
-    if (!this.isConfigured() || !this.client) {
+    if (!this.isConfigured()) {
       throw new ProviderError(
         this.id,
-        "Gemini Transcription is not configured. GEMINI_API_KEY is missing or blank.",
+        "Gemini transcription is not configured.",
         { code: "UNCONFIGURED", provider: this.id }
       );
     }
 
     const { audioBuffer, mimeType, projectId, audioSourceId, requestedMode } = input;
     if (!audioBuffer || audioBuffer.length === 0) {
-      throw new ProviderError(this.id, "Audio buffer is empty", { code: "INVALID_INPUT" });
+      throw new ProviderError(this.id, "Gemini transcription input is invalid.", {
+        code: "INVALID_INPUT",
+        provider: this.id,
+      });
     }
 
     const startTime = Date.now();
     let uploadedFileName: string | undefined;
+    let uploadedFileUri: string | undefined;
 
-    // Overall request-scoped abort controller and deadline
-    const abortController = new AbortController();
-    let isTimedOut = false;
-    const timeoutHandle = setTimeout(() => {
-      isTimedOut = true;
-      abortController.abort();
+    // Single request-scoped AbortController bounding the entire logical attempt
+    const attemptAbortController = new AbortController();
+    let isDeadlineExpired = false;
+
+    const deadlineTimer = setTimeout(() => {
+      isDeadlineExpired = true;
+      attemptAbortController.abort(new Error("DEADLINE_EXCEEDED"));
     }, this.timeoutMs);
 
     try {
-      // 1. Upload audio buffer via Google GenAI Files API
+      // 1. Upload audio buffer via Google GenAI Files API with genuine transport-level cancellation
       const uint8 = new Uint8Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength);
       const blob = new Blob([uint8 as unknown as BlobPart], { type: mimeType });
-      const uploadedFile = await this.client.files.upload({
-        file: blob,
-      });
-      uploadedFileName = uploadedFile.name;
+
+      if (this.client) {
+        const clientAny = this.client as unknown as Record<string, unknown>;
+        const clientFiles = clientAny.files as {
+          upload?: (params: unknown, options?: unknown) => Promise<{ name?: string; uri?: string; mimeType?: string }>;
+        } | undefined;
+
+        if (!clientFiles || typeof clientFiles.upload !== "function") {
+          throw new ProviderError(this.id, "Gemini transcription service is unavailable.", {
+            code: "UPSTREAM_UNAVAILABLE",
+            provider: this.id,
+          });
+        }
+
+        try {
+          const uploadedFile = await clientFiles.upload(
+            { file: blob, mimeType },
+            { signal: attemptAbortController.signal }
+          );
+          uploadedFileName = uploadedFile.name;
+          uploadedFileUri = uploadedFile.uri;
+        } catch (uploadErr: unknown) {
+          if (attemptAbortController.signal.aborted || isDeadlineExpired) {
+            throw new ProviderError(this.id, "Gemini transcription timed out.", {
+              code: "TIMEOUT",
+              provider: this.id,
+            });
+          }
+          throw uploadErr;
+        }
+      } else {
+        // Direct REST upload with native AbortSignal
+        const uploadUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(
+          this.apiKey
+        )}`;
+        const formData = new FormData();
+        formData.append("file", blob, "audio");
+
+        let uploadResponse: Response;
+        try {
+          uploadResponse = await this.fetchFn(uploadUrl, {
+            method: "POST",
+            headers: {
+              "x-goog-api-key": this.apiKey,
+            },
+            body: formData,
+            signal: attemptAbortController.signal,
+          });
+        } catch (fetchErr: unknown) {
+          if (attemptAbortController.signal.aborted || isDeadlineExpired) {
+            throw new ProviderError(this.id, "Gemini transcription timed out.", {
+              code: "TIMEOUT",
+              provider: this.id,
+            });
+          }
+          throw fetchErr;
+        }
+
+        if (!uploadResponse.ok) {
+          throw new ProviderError(
+            this.id,
+            uploadResponse.status === 401
+              ? "Gemini transcription authentication failed."
+              : "Gemini transcription service is unavailable.",
+            { code: uploadResponse.status === 401 ? "AUTH_FAILED" : "UPSTREAM_UNAVAILABLE", status: uploadResponse.status, provider: this.id }
+          );
+        }
+
+        const uploadJson = (await uploadResponse.json()) as { file?: { name?: string; uri?: string } };
+        uploadedFileName = uploadJson.file?.name;
+        uploadedFileUri = uploadJson.file?.uri;
+      }
 
       if (!uploadedFileName) {
-        throw new ProviderError(this.id, "Gemini Files upload did not return a valid file identifier", {
+        throw new ProviderError(this.id, "Gemini transcription returned a malformed response.", {
           code: "MALFORMED_RESPONSE",
+          provider: this.id,
         });
       }
 
-      // Check deadline budget before interactions.create
+      // Check remaining deadline budget before interactions.create
       const elapsedSoFarMs = Date.now() - startTime;
-      if (elapsedSoFarMs >= this.timeoutMs || abortController.signal.aborted) {
-        throw new ProviderError(this.id, `Gemini transcription request exceeded deadline of ${this.timeoutMs}ms`, {
+      if (elapsedSoFarMs >= this.timeoutMs || attemptAbortController.signal.aborted || isDeadlineExpired) {
+        throw new ProviderError(this.id, "Gemini transcription timed out.", {
           code: "TIMEOUT",
+          provider: this.id,
         });
       }
 
       // 2. Execute Transcription interaction with verbatim mode & word-level timestamps ONLY
-      const clientAny = this.client as unknown as Record<string, unknown>;
+      const fileUri = uploadedFileUri || uploadedFileName;
+      let rawInteraction: Record<string, unknown>;
 
-      if (
-        !clientAny.interactions ||
-        typeof (clientAny.interactions as { create?: unknown }).create !== "function"
-      ) {
-        throw new ProviderError(
-          this.id,
-          "Gemini 3.5 Transcribe Interactions API is not available on GenAI client. Canonical transcription requires interactions.create.",
-          { code: "UPSTREAM_UNAVAILABLE" }
-        );
-      }
+      if (this.client) {
+        const clientAny = this.client as unknown as Record<string, unknown>;
+        const clientInteractions = clientAny.interactions as {
+          create?: (params: unknown, options?: unknown) => Promise<Record<string, unknown>>;
+        } | undefined;
 
-      const interactionPromise = (
-        clientAny.interactions as {
-          create: (params: unknown) => Promise<Record<string, unknown>>;
-        }
-      ).create({
-        model: this.modelName,
-        input: [
-          {
-            type: "audio",
-            file_uri: uploadedFile.uri,
-            mime_type: uploadedFile.mimeType || mimeType,
-          },
-        ],
-        generation_config: {
-          transcription_config: {
-            mode: {
-              type: "verbatim",
-              timestamp_granularities: ["word"],
-            },
-          },
-        },
-      });
-
-      const response = await Promise.race([
-        interactionPromise,
-        new Promise<never>((_, reject) => {
-          abortController.signal.addEventListener("abort", () => {
-            reject(new ProviderError(this.id, "Gemini transcription interaction timed out", { code: "TIMEOUT" }));
-          });
-        }),
-      ]);
-
-      // 3. Extract word timestamps and text STRICTLY from official interaction structure
-      const rawWords: RawTranscriptionWord[] = [];
-      let detectedLanguage: string | null = null;
-      let displayText = "";
-
-      if (typeof response.output_text === "string") {
-        displayText = response.output_text;
-      } else if (typeof response.text === "string") {
-        displayText = response.text;
-      }
-
-      if (typeof response.language === "string") {
-        detectedLanguage = response.language;
-      }
-
-      // Official Gemini 3.5 Transcribe format: interaction.steps[].content[].annotations[]
-      const steps = Array.isArray(response.steps)
-        ? response.steps
-        : Array.isArray((response as { interaction?: { steps?: unknown[] } }).interaction?.steps)
-          ? ((response as { interaction: { steps: unknown[] } }).interaction.steps as unknown[])
-          : null;
-
-      if (!steps || !Array.isArray(steps) || steps.length === 0) {
-        // If output_text is empty or noSpeech is signaled
-        if (response.noSpeech === true || displayText.trim() === "") {
-          return {
+        if (!clientInteractions || typeof clientInteractions.create !== "function") {
+          throw new ProviderError(this.id, "Gemini transcription service is unavailable.", {
+            code: "UPSTREAM_UNAVAILABLE",
             provider: this.id,
-            model: this.modelName,
-            requestedMode,
-            displayText: "",
-            canonicalText: "",
-            detectedLanguage: null,
-            durationMs: 0,
-            wordCount: 0,
-            words: [],
-            noSpeech: true,
-          };
+          });
         }
-        throw new ProviderError(
-          this.id,
-          "Gemini transcription interaction returned no steps/content annotations for spoken audio",
-          { code: "MISSING_TIMESTAMPS" }
-        );
+
+        try {
+          rawInteraction = await clientInteractions.create(
+            {
+              model: this.modelName,
+              input: [
+                {
+                  type: "audio",
+                  file_uri: fileUri,
+                  mime_type: mimeType,
+                },
+              ],
+              generation_config: {
+                transcription_config: {
+                  mode: {
+                    type: "verbatim",
+                    timestamp_granularities: ["word"],
+                  },
+                },
+              },
+            },
+            { signal: attemptAbortController.signal }
+          );
+        } catch (interactionErr: unknown) {
+          if (attemptAbortController.signal.aborted || isDeadlineExpired) {
+            throw new ProviderError(this.id, "Gemini transcription timed out.", {
+              code: "TIMEOUT",
+              provider: this.id,
+            });
+          }
+          throw interactionErr;
+        }
+      } else {
+        // Direct REST Interactions API call with native AbortSignal
+        const interactionUrl = `https://generativelanguage.googleapis.com/v1beta/interactions?key=${encodeURIComponent(
+          this.apiKey
+        )}`;
+
+        let interactionResponse: Response;
+        try {
+          interactionResponse = await this.fetchFn(interactionUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": this.apiKey,
+            },
+            body: JSON.stringify({
+              model: this.modelName,
+              input: [
+                {
+                  type: "audio",
+                  file_uri: fileUri,
+                  mime_type: mimeType,
+                },
+              ],
+              generation_config: {
+                transcription_config: {
+                  mode: {
+                    type: "verbatim",
+                    timestamp_granularities: ["word"],
+                  },
+                },
+              },
+            }),
+            signal: attemptAbortController.signal,
+          });
+        } catch (fetchErr: unknown) {
+          if (attemptAbortController.signal.aborted || isDeadlineExpired) {
+            throw new ProviderError(this.id, "Gemini transcription timed out.", {
+              code: "TIMEOUT",
+              provider: this.id,
+            });
+          }
+          throw fetchErr;
+        }
+
+        if (!interactionResponse.ok) {
+          throw new ProviderError(
+            this.id,
+            interactionResponse.status === 401
+              ? "Gemini transcription authentication failed."
+              : "Gemini transcription service is unavailable.",
+            { code: interactionResponse.status === 401 ? "AUTH_FAILED" : "UPSTREAM_UNAVAILABLE", status: interactionResponse.status, provider: this.id }
+          );
+        }
+
+        rawInteraction = (await interactionResponse.json()) as Record<string, unknown>;
       }
 
-      for (const stepItem of steps) {
-        const step = stepItem as { content?: unknown[] };
-        if (!Array.isArray(step?.content)) continue;
+      // 3. Parse canonical word timestamps exclusively from interaction.steps[].content[].annotations[]
+      const rawWords: RawTranscriptionWord[] = [];
+      let topLevelDisplayText = "";
+      const detectedLocale: string | null = null;
 
-        for (const contentItem of step.content) {
-          const content = contentItem as { annotations?: unknown[]; text?: string };
-          if (typeof content?.text === "string" && !displayText) {
-            displayText = content.text;
+      if (typeof rawInteraction.output_text === "string") {
+        topLevelDisplayText = rawInteraction.output_text;
+      } else if (typeof rawInteraction.text === "string") {
+        topLevelDisplayText = rawInteraction.text;
+      }
+
+      const steps = Array.isArray(rawInteraction.steps) ? rawInteraction.steps : [];
+      for (const step of steps) {
+        if (!step || typeof step !== "object") continue;
+        const contents = Array.isArray(step.content) ? step.content : [step.content];
+
+        for (const content of contents) {
+          if (!content || typeof content !== "object") continue;
+
+          if (!topLevelDisplayText && typeof content.text === "string") {
+            topLevelDisplayText = content.text;
           }
 
-          if (!Array.isArray(content?.annotations)) continue;
+          const annotations = Array.isArray(content.annotations) ? content.annotations : [];
+          for (const ann of annotations) {
+            if (!ann || typeof ann !== "object") continue;
 
-          for (const annotationItem of content.annotations) {
-            const ann = annotationItem as Record<string, unknown>;
-            if (ann?.type === "word_info") {
-              const text = String(ann.text ?? "").trim();
-              if (!text) continue;
+            const isWordInfo =
+              ann.type === "word_info" ||
+              ann.annotation_type === "word_info" ||
+              ann.word_info !== undefined ||
+              ann.word !== undefined;
 
-              const startMs = this.parseOffsetToMs(
-                ann.start_offset ?? ann.startOffset ?? ann.start
-              );
-              const endMs = this.parseOffsetToMs(
-                ann.end_offset ?? ann.endOffset ?? ann.end
-              );
+            if (isWordInfo) {
+              const wordObj = ann.word_info || ann;
+              const text = String(wordObj.word || wordObj.text || "").trim();
+              const startMs = parseTimestampOffsetToMs(wordObj.start_offset ?? wordObj.start_time ?? wordObj.start);
+              const endMs = parseTimestampOffsetToMs(wordObj.end_offset ?? wordObj.end_time ?? wordObj.end);
 
-              if (startMs === null || endMs === null) {
-                throw new ProviderError(
-                  this.id,
-                  `Malformed or missing timestamp offset in Gemini word_info annotation: start=${String(ann.start_offset)}, end=${String(ann.end_offset)}`,
-                  { code: "MALFORMED_RESPONSE" }
-                );
+              if (text && startMs !== null && endMs !== null) {
+                if (endMs < startMs) {
+                  throw new ValidationError(`Malformed timestamp: endMs (${endMs}) is earlier than startMs (${startMs})`);
+                }
+
+                rawWords.push({
+                  text,
+                  startMs,
+                  endMs,
+                  confidence: typeof wordObj.confidence === "number" ? wordObj.confidence : null,
+                  speaker: wordObj.speaker_id || wordObj.speaker ? String(wordObj.speaker_id || wordObj.speaker) : null,
+                  locale: wordObj.language_code || detectedLocale || null,
+                });
               }
-
-              if (endMs < startMs) {
-                throw new ProviderError(
-                  this.id,
-                  `Invalid timing in Gemini word_info annotation: end (${endMs}ms) < start (${startMs}ms)`,
-                  { code: "MALFORMED_RESPONSE" }
-                );
-              }
-
-              rawWords.push({
-                text,
-                startMs,
-                endMs,
-                speaker: typeof ann.speaker === "string" ? ann.speaker : null,
-                confidence: typeof ann.confidence === "number" ? ann.confidence : null,
-              });
             }
           }
         }
       }
 
-      // Handle NO_SPEECH
+      // 4. Handle NO_SPEECH vs MISSING_TIMESTAMPS
       if (rawWords.length === 0) {
-        if (response.noSpeech === true || displayText.trim() === "") {
+        if (!topLevelDisplayText || topLevelDisplayText.trim().length === 0) {
           return {
             provider: this.id,
             model: this.modelName,
@@ -272,25 +369,30 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
             noSpeech: true,
           };
         }
+
         throw new ProviderError(
           this.id,
-          "Gemini transcription returned non-empty text but zero valid word_info timestamp annotations",
-          { code: "MISSING_TIMESTAMPS" }
+          "Gemini transcription is missing word-level timestamps.",
+          { code: "MISSING_TIMESTAMPS", provider: this.id }
         );
       }
 
-      // 4. Validate word timing invariants
-      assertValidTranscriptionWords(rawWords);
+      // 5. Invariant assertion
+      try {
+        assertValidTranscriptionWords(rawWords);
+      } catch {
+        throw new ProviderError(
+          this.id,
+          "Gemini transcription returned a malformed response.",
+          { code: "MALFORMED_RESPONSE", provider: this.id }
+        );
+      }
 
-      // 5. Build canonical transcript and exact UTF-16 slices
+      // 6. Build canonical transcript and exact UTF-16 slices
       const canonical = buildCanonicalTranscript(rawWords);
       const lastWord = rawWords[rawWords.length - 1];
       const durationMs = lastWord ? lastWord.endMs : 0;
       const elapsedMs = Date.now() - startTime;
-
-      if (!displayText) {
-        displayText = canonical.canonicalText;
-      }
 
       this.logger?.info({
         event: "transcription.gemini_success",
@@ -307,111 +409,76 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
         provider: this.id,
         model: this.modelName,
         requestedMode,
-        displayText,
+        displayText: topLevelDisplayText || canonical.canonicalText,
         canonicalText: canonical.canonicalText,
-        detectedLanguage,
+        detectedLanguage: detectedLocale,
         durationMs,
         wordCount: canonical.words.length,
         words: canonical.words,
       };
     } catch (err: unknown) {
-      if (err instanceof ProviderError) {
-        throw err;
+      if (attemptAbortController.signal.aborted || isDeadlineExpired) {
+        throw new ProviderError(this.id, "Gemini transcription timed out.", {
+          code: "TIMEOUT",
+          provider: this.id,
+        });
       }
-      if (err instanceof ValidationError) {
-        throw new ProviderError(this.id, err.message, { code: "MALFORMED_RESPONSE" });
-      }
 
-      const error =
-        typeof err === "object" && err !== null
-          ? (err as Record<string, unknown>)
-          : {};
-      const status =
-        typeof error.status === "number"
-          ? error.status
-          : typeof error.statusCode === "number"
-            ? error.statusCode
-            : typeof error.httpStatus === "number"
-              ? error.httpStatus
-              : undefined;
-      const rawMessage =
-        err instanceof Error
-          ? err.message
-          : typeof error.message === "string"
-            ? error.message
-            : "Gemini transcription request failed";
-
-      const sanitizedMessage = sanitizeErrorMessage(rawMessage);
-
-      let code = "UPSTREAM_UNAVAILABLE";
-      if (status === 400) code = "INVALID_REQUEST";
-      else if (status === 401) code = "AUTH_FAILED";
-      else if (status === 403) code = "FORBIDDEN";
-      else if (status === 404) code = "MODEL_UNAVAILABLE";
-      else if (status === 429) code = "RATE_LIMITED";
-      else if (
-        isTimedOut ||
-        (err instanceof Error && err.name === "AbortError") ||
-        rawMessage.toLowerCase().includes("timeout")
-      )
-        code = "TIMEOUT";
-      else if (rawMessage.toLowerCase().includes("fetch failed") || rawMessage.toLowerCase().includes("network"))
-        code = "NETWORK_FAILURE";
+      const normalized = normalizeProviderError(this.id, err);
+      const code = (normalized.details as { code?: string })?.code || "UPSTREAM_UNAVAILABLE";
 
       this.logger?.warn({
         event: "transcription.gemini_failed",
         projectId,
         audioSourceId,
         provider: this.id,
+        model: this.modelName,
         code,
-        status,
         elapsedMs: Date.now() - startTime,
       });
 
-      throw new ProviderError(this.id, `Gemini transcription failed (${code}): ${sanitizedMessage}`, {
-        code,
-        status,
-        provider: this.id,
-      });
+      throw normalized;
     } finally {
-      clearTimeout(timeoutHandle);
-      // 6. Explicit best-effort cleanup of remote Gemini file in finally
-      if (uploadedFileName && this.client) {
+      clearTimeout(deadlineTimer);
+
+      // Best-effort bounded remote file cleanup in finally
+      if (uploadedFileName) {
+        const cleanupController = new AbortController();
+        const cleanupTimer = setTimeout(() => cleanupController.abort(), 5000);
+
         try {
-          await this.client.files.delete({ name: uploadedFileName });
+          if (this.client) {
+            const clientAny = this.client as unknown as Record<string, unknown>;
+            const clientFiles = clientAny.files as {
+              delete?: (params: { name: string }, options?: unknown) => Promise<unknown>;
+            } | undefined;
+
+            if (clientFiles && typeof clientFiles.delete === "function") {
+              await clientFiles.delete(
+                { name: uploadedFileName },
+                { signal: cleanupController.signal }
+              );
+            }
+          } else {
+            const deleteUrl = `https://generativelanguage.googleapis.com/v1beta/${uploadedFileName}?key=${encodeURIComponent(
+              this.apiKey
+            )}`;
+            await this.fetchFn(deleteUrl, {
+              method: "DELETE",
+              headers: { "x-goog-api-key": this.apiKey },
+              signal: cleanupController.signal,
+            });
+          }
         } catch {
-          // File deletion failure must not fail the accepted result or throw
+          this.logger?.warn({
+            event: "transcription.cleanup_failed",
+            provider: this.id,
+            category: cleanupController.signal.aborted ? "CLEANUP_TIMEOUT" : "CLEANUP_ERROR",
+          });
+        } finally {
+          clearTimeout(cleanupTimer);
         }
       }
     }
-  }
-
-  /**
-   * Parses official Gemini duration strings (e.g. "0.100s", "1.250s", "0s") or numeric seconds
-   * deterministically into milliseconds. Rejects missing, negative, NaN, or non-finite values.
-   */
-  private parseOffsetToMs(value: unknown): number | null {
-    if (value === undefined || value === null || value === "") {
-      return null;
-    }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value) || value < 0) return null;
-      return Number.isInteger(value) && value > 10000
-        ? value
-        : Math.round(value * (value < 1000 ? 1000 : 1));
-    }
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      const match = trimmed.match(/^(\d+(?:\.\d+)?)s$/);
-      if (match && match[1]) {
-        const sec = parseFloat(match[1]);
-        if (!Number.isFinite(sec) || sec < 0) return null;
-        return Math.round(sec * 1000);
-      }
-      const sec = parseFloat(trimmed);
-      if (!Number.isFinite(sec) || sec < 0) return null;
-      return Math.round(sec * (trimmed.endsWith("s") || sec < 1000 ? 1000 : 1));
-    }
-    return null;
   }
 }

@@ -14,6 +14,7 @@ import type {
   TranscriptionProvider,
 } from "./transcription-provider.interface";
 import type { Logger } from "@/infrastructure/logging/logger";
+import { normalizeProviderError } from "./provider-error-normalizer";
 
 export interface AzureTranscribeProviderOptions {
   apiKey?: string;
@@ -50,7 +51,7 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
     if (!this.isConfigured()) {
       throw new ProviderError(
         this.id,
-        "Azure Speech-to-Text is not configured. AZURE_SPEECH_KEY or AZURE_SPEECH_REGION is missing.",
+        "Azure Speech-to-Text is not configured.",
         { code: "UNCONFIGURED", provider: this.id }
       );
     }
@@ -115,7 +116,7 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
       const rawWords: RawTranscriptionWord[] = [];
       let fullDisplayText = "";
       let detectedLocale: string | null = null;
-      let sessionError: Error | null = null;
+      let sessionErrorCode: string | null = null;
 
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -124,7 +125,7 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
           } catch {
             // Ignore
           }
-          reject(new ProviderError(this.id, "Azure Speech recognition timed out", { code: "TIMEOUT" }));
+          reject(new ProviderError(this.id, "Azure transcription timed out.", { code: "TIMEOUT", provider: this.id }));
         }, this.timeoutMs);
 
         recognizer.recognized = (_, e) => {
@@ -175,15 +176,20 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
 
         recognizer.canceled = (_, e) => {
           if (e.reason === sdk.CancellationReason.Error) {
-            sessionError = new ProviderError(
-              this.id,
-              `Azure Speech recognition canceled: ${e.errorDetails}`,
-              { code: "RECOGNITION_ERROR", details: e.errorDetails }
-            );
+            const errDetails = String(e.errorDetails || "");
+            if (errDetails.includes("401") || /authentication|auth/i.test(errDetails)) {
+              sessionErrorCode = "AUTH_FAILED";
+            } else if (errDetails.includes("403") || /forbidden/i.test(errDetails)) {
+              sessionErrorCode = "FORBIDDEN";
+            } else if (errDetails.includes("429") || /quota|rate/i.test(errDetails)) {
+              sessionErrorCode = "RATE_LIMITED";
+            } else {
+              sessionErrorCode = "UPSTREAM_UNAVAILABLE";
+            }
           }
           recognizer.stopContinuousRecognitionAsync(
             () => resolve(),
-            (err) => reject(err)
+            () => resolve()
           );
         };
 
@@ -191,7 +197,7 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
           clearTimeout(timer);
           recognizer.stopContinuousRecognitionAsync(
             () => resolve(),
-            (err) => reject(err)
+            () => resolve()
           );
         };
 
@@ -199,15 +205,24 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
           () => {
             // Recognition started
           },
-          (err) => {
+          () => {
             clearTimeout(timer);
-            reject(new ProviderError(this.id, `Failed to start Azure Speech recognition: ${err}`, { cause: err }));
+            reject(
+              new ProviderError(this.id, "Azure transcription service is unavailable.", {
+                code: "UPSTREAM_UNAVAILABLE",
+                provider: this.id,
+              })
+            );
           }
         );
       });
 
-      if (sessionError) {
-        throw sessionError;
+      if (sessionErrorCode) {
+        const normalized = normalizeProviderError(
+          this.id,
+          new ProviderError(this.id, "Azure transcription error", { code: sessionErrorCode })
+        );
+        throw normalized;
       }
 
       // 4. Handle NO_SPEECH
@@ -228,8 +243,8 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
         }
         throw new ProviderError(
           this.id,
-          "Azure Speech recognition returned text but failed to produce word timestamps",
-          { code: "MISSING_TIMESTAMPS" }
+          "Azure transcription is missing word-level timestamps.",
+          { code: "MISSING_TIMESTAMPS", provider: this.id }
         );
       }
 
@@ -265,19 +280,8 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
         words: canonical.words,
       };
     } catch (err: unknown) {
-      if (err instanceof ProviderError) {
-        throw err;
-      }
-
-      const message =
-        err instanceof Error ? err.message : "Azure Speech recognition request failed";
-
-      let code = "UPSTREAM_UNAVAILABLE";
-      if (message.includes("401") || message.includes("Authentication")) code = "AUTH_FAILED";
-      else if (message.includes("403") || message.includes("Forbidden")) code = "FORBIDDEN";
-      else if (message.includes("429") || message.includes("Quota")) code = "RATE_LIMITED";
-      else if (message.includes("timeout") || message.includes("TIMEOUT")) code = "TIMEOUT";
-      else if (message.includes("network") || message.includes("Connection")) code = "NETWORK_FAILURE";
+      const normalized = normalizeProviderError(this.id, err);
+      const code = (normalized.details as { code?: string })?.code || "UPSTREAM_UNAVAILABLE";
 
       this.logger?.warn({
         event: "transcription.azure_failed",
@@ -285,14 +289,10 @@ export class AzureTranscribeProvider implements TranscriptionProvider {
         audioSourceId,
         provider: this.id,
         code,
-        message,
         elapsedMs: Date.now() - startTime,
       });
 
-      throw new ProviderError(this.id, `Azure Speech recognition failed (${code}): ${message}`, {
-        code,
-        provider: this.id,
-      });
+      throw normalized;
     } finally {
       // Guaranteed cleanup of temporary normalized WAV in finally
       if (cleanupNormalized) {

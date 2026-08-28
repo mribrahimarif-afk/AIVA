@@ -225,6 +225,11 @@ export function DirectorWorkspace({
                 <Badge tone="info" className="text-xs">
                   {plan.contentType.replace("_", " ")}
                 </Badge>
+                {plan.sourceType === "AUDIO_TRANSCRIPT" && plan.isCurrent === false && (
+                  <Badge tone="warning" className="text-xs">
+                    Historical / Stale Plan
+                  </Badge>
+                )}
               </div>
 
               <div className="flex items-center gap-3 text-xs text-neutral-400">

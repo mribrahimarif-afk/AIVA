@@ -122,6 +122,7 @@ const directorServiceInstance = createDirectorService({
   brandRepository: repositories.brand,
   productRepository: repositories.product,
   audioSourceRepository: repositories.audioSource,
+  transcriptionRepository: repositories.transcription,
   directorAiProvider,
   logger,
   maxScriptChars: env.DIRECTOR_MAX_SCRIPT_CHARS,
@@ -163,6 +164,8 @@ export const services = {
     projectRepository: repositories.project,
     directorPlanRepository: repositories.directorPlan,
     voiceTrackRepository: repositories.voiceTrack,
+    audioSourceRepository: repositories.audioSource,
+    transcriptionRepository: repositories.transcription,
     voiceProvider: azureVoiceProvider,
     voiceProviders: {
       "azure-speech": azureVoiceProvider,

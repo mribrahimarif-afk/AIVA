@@ -46,7 +46,7 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
       }
     }
 
-    // Apply migration 7 triggers
+    // Apply migration 7 triggers (audio_sources activeTranscriptionId ownership)
     await prisma.$executeRawUnsafe(`
       CREATE TRIGGER IF NOT EXISTS trg_audio_sources_active_transcription_insert
       BEFORE INSERT ON audio_sources
@@ -75,6 +75,49 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
             WHERE id = NEW.activeTranscriptionId AND audioSourceId = NEW.id
           )
           THEN RAISE(ABORT, 'activeTranscriptionId must reference a Transcription owned by this AudioSource')
+        END;
+      END
+    `);
+
+    // Apply migration 8 triggers (director_plans project-scoped provenance hardening)
+    await prisma.$executeRawUnsafe(`
+      CREATE TRIGGER IF NOT EXISTS trg_director_plans_source_transcription_insert
+      BEFORE INSERT ON director_plans
+      FOR EACH ROW
+      WHEN NEW.sourceType = 'AUDIO_TRANSCRIPT'
+      BEGIN
+        SELECT CASE
+          WHEN NEW.sourceTranscriptionId IS NULL OR NOT EXISTS (
+            SELECT 1 FROM transcriptions
+            WHERE id = NEW.sourceTranscriptionId AND projectId = NEW.projectId
+          )
+          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan requires a valid sourceTranscriptionId belonging to the same project')
+          WHEN NEW.sourceAudioHash IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM transcriptions
+            WHERE id = NEW.sourceTranscriptionId AND sourceAudioHash = NEW.sourceAudioHash
+          )
+          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan sourceAudioHash must match the referenced transcription')
+        END;
+      END
+    `);
+
+    await prisma.$executeRawUnsafe(`
+      CREATE TRIGGER IF NOT EXISTS trg_director_plans_source_transcription_update
+      BEFORE UPDATE ON director_plans
+      FOR EACH ROW
+      WHEN NEW.sourceType = 'AUDIO_TRANSCRIPT'
+      BEGIN
+        SELECT CASE
+          WHEN NEW.sourceTranscriptionId IS NULL OR NOT EXISTS (
+            SELECT 1 FROM transcriptions
+            WHERE id = NEW.sourceTranscriptionId AND projectId = NEW.projectId
+          )
+          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan requires a valid sourceTranscriptionId belonging to the same project')
+          WHEN NEW.sourceAudioHash IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM transcriptions
+            WHERE id = NEW.sourceTranscriptionId AND sourceAudioHash = NEW.sourceAudioHash
+          )
+          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan sourceAudioHash must match the referenced transcription')
         END;
       END
     `);
@@ -152,5 +195,62 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
         data: { activeTranscriptionId: "t-own-1" },
       })
     ).rejects.toThrow();
+  });
+
+  it("3. database trigger rejects DirectorPlan with sourceTranscriptionId from a different project", async () => {
+    await prisma.project.create({
+      data: {
+        id: "p-test-foreign",
+        name: "Foreign Project",
+      },
+    });
+
+    // Attempting to insert an AUDIO_TRANSCRIPT DirectorPlan for p-test-foreign referencing t-own-1 (which belongs to p-test-own-1)
+    await expect(
+      prisma.directorPlan.create({
+        data: {
+          id: "dp-foreign-fail",
+          projectId: "p-test-foreign",
+          originalScript: "Test script",
+          scriptHash: "hash-script",
+          unitizerVersion: "v1",
+          schemaVersion: "v1",
+          promptVersion: "v1",
+          model: "gemini-model",
+          language: "en",
+          contentType: "PROMOTIONAL",
+          summary: "Summary",
+          creativeDirection: "Direction",
+          sourceType: "AUDIO_TRANSCRIPT",
+          sourceTranscriptionId: "t-own-1", // foreign project!
+          sourceAudioHash: "hash-1",
+        },
+      })
+    ).rejects.toThrow();
+  });
+
+  it("4. database trigger allows DirectorPlan when sourceTranscriptionId and sourceAudioHash match the project", async () => {
+    const plan = await prisma.directorPlan.create({
+      data: {
+        id: "dp-valid-prov",
+        projectId: "p-test-own-1",
+        originalScript: "Test script",
+        scriptHash: "hash-script-valid",
+        unitizerVersion: "v1",
+        schemaVersion: "v1",
+        promptVersion: "v1",
+        model: "gemini-model",
+        language: "en",
+        contentType: "PROMOTIONAL",
+        summary: "Summary",
+        creativeDirection: "Direction",
+        sourceType: "AUDIO_TRANSCRIPT",
+        sourceTranscriptionId: "t-own-1",
+        sourceAudioHash: "hash-1",
+      },
+    });
+
+    expect(plan.id).toBe("dp-valid-prov");
+    expect(plan.sourceTranscriptionId).toBe("t-own-1");
   });
 });

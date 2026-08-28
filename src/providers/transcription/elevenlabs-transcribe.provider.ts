@@ -11,6 +11,7 @@ import type {
   TranscriptionProvider,
 } from "./transcription-provider.interface";
 import type { Logger } from "@/infrastructure/logging/logger";
+import { normalizeProviderError } from "./provider-error-normalizer";
 
 export interface ElevenLabsTranscribeProviderOptions {
   apiKey?: string;
@@ -53,21 +54,11 @@ export class ElevenLabsTranscribeProvider implements TranscriptionProvider {
     return this.enabled;
   }
 
-  private normalizeHttpError(status: number, body?: string): ProviderError {
-    let code = "UPSTREAM_UNAVAILABLE";
-    if (status === 400) code = "INVALID_REQUEST";
-    else if (status === 401) code = "AUTH_FAILED";
-    else if (status === 403) code = "FORBIDDEN";
-    else if (status === 404) code = "MODEL_UNAVAILABLE";
-    else if (status === 429) code = "RATE_LIMITED";
-    return new ProviderError(this.id, `ElevenLabs Scribe API request failed with status ${status}: ${body}`, { code, status, provider: this.id });
-  }
-
   async transcribe(input: TranscriptionInput): Promise<TranscriptionResult> {
     if (!this.enabled) {
       throw new ProviderError(
         this.id,
-        "ElevenLabs Scribe transcription is currently disabled. Set ELEVENLABS_STT_ENABLED=true to enable.",
+        "ElevenLabs transcription is currently disabled.",
         { code: "DISABLED", provider: this.id }
       );
     }
@@ -75,7 +66,7 @@ export class ElevenLabsTranscribeProvider implements TranscriptionProvider {
     if (!this.apiKey || this.apiKey.trim().length === 0) {
       throw new ProviderError(
         this.id,
-        "ElevenLabs Scribe transcription is not configured. API key is missing.",
+        "ElevenLabs transcription is not configured.",
         { code: "UNCONFIGURED", provider: this.id }
       );
     }
@@ -94,23 +85,48 @@ export class ElevenLabsTranscribeProvider implements TranscriptionProvider {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
 
-      const response = await this.fetchFn("https://api.elevenlabs.io/v1/speech-to-text", {
-        method: "POST",
-        headers: {
-          "xi-api-key": this.apiKey,
-        },
-        body: formData,
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeoutId));
+      let response: Response;
+      try {
+        response = await this.fetchFn("https://api.elevenlabs.io/v1/speech-to-text", {
+          method: "POST",
+          headers: {
+            "xi-api-key": this.apiKey,
+          },
+          body: formData,
+          signal: controller.signal,
+        });
+      } catch {
+        if (controller.signal.aborted) {
+          throw new ProviderError(this.id, "ElevenLabs transcription timed out.", {
+            code: "TIMEOUT",
+            provider: this.id,
+          });
+        }
+        throw new ProviderError(this.id, "ElevenLabs transcription network failure.", {
+          code: "NETWORK_FAILURE",
+          provider: this.id,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
-        let errorBody = "";
-        try {
-          errorBody = await response.text();
-        } catch {
-          // Ignore
-        }
-        throw this.normalizeHttpError(response.status, errorBody);
+        let code = "UPSTREAM_UNAVAILABLE";
+        if (response.status === 400) code = "INVALID_REQUEST";
+        else if (response.status === 401) code = "AUTH_FAILED";
+        else if (response.status === 403) code = "FORBIDDEN";
+        else if (response.status === 404) code = "MODEL_UNAVAILABLE";
+        else if (response.status === 429) code = "RATE_LIMITED";
+
+        throw new ProviderError(
+          this.id,
+          code === "AUTH_FAILED"
+            ? "ElevenLabs transcription authentication failed."
+            : code === "RATE_LIMITED"
+              ? "ElevenLabs transcription is temporarily rate limited."
+              : "ElevenLabs transcription service is unavailable.",
+          { code, status: response.status, provider: this.id }
+        );
       }
 
       const data = await response.json();
@@ -147,8 +163,8 @@ export class ElevenLabsTranscribeProvider implements TranscriptionProvider {
         }
         throw new ProviderError(
           this.id,
-          "ElevenLabs Scribe returned text but missing word timestamps",
-          { code: "MISSING_TIMESTAMPS" }
+          "ElevenLabs transcription is missing word-level timestamps.",
+          { code: "MISSING_TIMESTAMPS", provider: this.id }
         );
       }
 
@@ -181,13 +197,8 @@ export class ElevenLabsTranscribeProvider implements TranscriptionProvider {
         words: canonical.words,
       };
     } catch (err: unknown) {
-      if (err instanceof ProviderError) throw err;
-
-      const errorName = err instanceof Error ? err.name : "";
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      let code = "UPSTREAM_UNAVAILABLE";
-      if (errorName === "AbortError") code = "TIMEOUT";
-      else if (errorMessage.includes("fetch failed")) code = "NETWORK_FAILURE";
+      const normalized = normalizeProviderError(this.id, err);
+      const code = (normalized.details as { code?: string })?.code || "UPSTREAM_UNAVAILABLE";
 
       this.logger?.warn({
         event: "transcription.elevenlabs_failed",
@@ -198,10 +209,7 @@ export class ElevenLabsTranscribeProvider implements TranscriptionProvider {
         elapsedMs: Date.now() - startTime,
       });
 
-      throw new ProviderError(this.id, `ElevenLabs Scribe transcription failed: ${errorMessage}`, {
-        code,
-        provider: this.id,
-      });
+      throw normalized;
     }
   }
 }
