@@ -79,8 +79,9 @@ export function sanitizeAudioFilename(originalFilename: string | undefined | nul
     return "uploaded-audio";
   }
 
-  // Strip path traversal prefixes and directories
-  const baseName = path.basename(originalFilename);
+  // Cross-platform basename extraction: split on both / and \
+  const segments = originalFilename.split(/[/\\]/);
+  const baseName = segments[segments.length - 1] || "uploaded-audio";
   // Replace illegal filename characters with dashes
   const sanitized = baseName.replace(/[/\\?%*:|"<>]/g, "-").trim();
 
