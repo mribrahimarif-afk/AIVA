@@ -5,8 +5,8 @@ export const transcriptionModeSchema = z.enum(TRANSCRIPTION_MODES);
 
 export const transcribeRequestSchema = z.object({
   audioSourceId: z.string().trim().min(1, "audioSourceId is required"),
-  mode: transcriptionModeSchema.default("AUTO"),
-  force: z.boolean().optional().default(false),
+  mode: transcriptionModeSchema.optional(),
+  force: z.boolean().optional(),
 });
 
 export type TranscribeRequestInput = z.infer<typeof transcribeRequestSchema>;

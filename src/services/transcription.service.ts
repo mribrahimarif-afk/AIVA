@@ -198,10 +198,14 @@ export class TranscriptionService {
       audioSource.storageRef
     );
 
-    // 5. Preflight duration check
-    if (audioSource.durationMs && audioSource.durationMs > MAX_AUDIO_DURATION_MS) {
+    // 5. Preflight duration check before any provider dispatch
+    let probedDurationMs: number | null = audioSource.durationMs ?? null;
+    if (probedDurationMs === null) {
+      probedDurationMs = await probeAudioDurationMs(audioBuffer, sourceFilePath);
+    }
+    if (typeof probedDurationMs === "number" && probedDurationMs > MAX_AUDIO_DURATION_MS) {
       throw new ValidationError(
-        `Audio duration (${audioSource.durationMs}ms) exceeds the maximum allowed ceiling of 30 minutes`
+        `Audio duration (${probedDurationMs}ms) exceeds the maximum allowed ceiling of 30 minutes`
       );
     }
 
@@ -210,7 +214,7 @@ export class TranscriptionService {
       audioBuffer,
       mimeType: audioSource.mimeType,
       sourceFilePath,
-      durationMs: audioSource.durationMs !== null ? audioSource.durationMs : undefined,
+      durationMs: probedDurationMs !== null ? probedDurationMs : undefined,
       projectId,
       audioSourceId,
       requestedMode: mode,

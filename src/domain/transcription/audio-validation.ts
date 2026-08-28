@@ -1,4 +1,3 @@
-import path from "node:path";
 import { ValidationError } from "@/domain/errors";
 
 export interface SupportedAudioFormat {
