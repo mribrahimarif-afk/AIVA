@@ -111,6 +111,9 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
 
         const url = new URL("https://api.elevenlabs.io/v2/voices");
         url.searchParams.set("page_size", String(ELEVENLABS_DISCOVERY_PAGE_SIZE));
+        // total_count is a live, comparatively expensive snapshot and is not
+        // needed for cursor pagination. ElevenLabs recommends has_more + token.
+        url.searchParams.set("include_total_count", "false");
         if (pageToken) {
           url.searchParams.set("next_page_token", pageToken);
         }
