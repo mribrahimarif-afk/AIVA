@@ -29,6 +29,7 @@ model Project {
   voiceTrack   VoiceTrack?
   audioSources AudioSource[]
   transcriptions Transcription[]
+  timelines     Timeline[]
 
   @@index([status])
   @@index([createdAt])
@@ -174,6 +175,7 @@ model DirectorPlan {
   project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   scenes            DirectorScene[]
   voiceTracks       VoiceTrack[]
+  timelines         Timeline[]
 
   @@index([projectId])
   @@index([scriptHash])
@@ -320,4 +322,41 @@ model TranscriptionWord {
   @@map("transcription_words")
 }
 
+model Timeline {
+  id               String   @id @default(cuid())
+  projectId        String
+  directorPlanId   String
+  timingSourceType String
+  timingSourceId   String
+  totalDurationMs  Int
+  createdAt        DateTime @default(now())
+
+  project      Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  directorPlan DirectorPlan    @relation(fields: [directorPlanId], references: [id], onDelete: Cascade)
+  scenes       TimelineScene[]
+
+  @@unique([directorPlanId, timingSourceType, timingSourceId])
+  @@index([projectId, createdAt])
+  @@index([directorPlanId])
+  @@map("timelines")
+}
+
+model TimelineScene {
+  id              String @id @default(cuid())
+  timelineId      String
+  directorSceneId String
+  sequence        Int
+  sourceStart     Int
+  sourceEnd       Int
+  startMs         Int
+  endMs           Int
+  durationMs      Int
+
+  timeline Timeline @relation(fields: [timelineId], references: [id], onDelete: Cascade)
+
+  @@unique([timelineId, sequence])
+  @@index([timelineId])
+  @@index([directorSceneId])
+  @@map("timeline_scenes")
+}
 
