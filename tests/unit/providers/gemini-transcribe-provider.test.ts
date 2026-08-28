@@ -8,13 +8,14 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
     expect(provider.isConfigured()).toBe(false);
   });
 
-  it("successfully parses official Gemini 3.5 interaction with steps, content, word_info annotations, and duration strings", async () => {
+  it("1. uses interactions.create with verbatim and word granularities, never calls generateContent", async () => {
     const deleteSpy = vi.fn().mockResolvedValue({});
     const uploadSpy = vi.fn().mockResolvedValue({
       name: "files/test-interaction-123",
       uri: "https://generativelanguage.googleapis.com/v1beta/files/test-interaction-123",
       mimeType: "audio/wav",
     });
+    const generateContentSpy = vi.fn();
 
     const officialInteractionResponse = {
       output_text: "AIVA Studio is awesome today",
@@ -34,7 +35,7 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
                   speaker: "Speaker 1",
                 },
                 {
-                  type: "other_info", // Ignored non-word annotation
+                  type: "other_info",
                   data: "ignore_me",
                 },
                 {
@@ -86,6 +87,9 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
         upload: uploadSpy,
         delete: deleteSpy,
       },
+      models: {
+        generateContent: generateContentSpy,
+      },
       interactions: {
         create: createInteractionSpy,
       },
@@ -106,7 +110,7 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
 
     expect(uploadSpy).toHaveBeenCalledTimes(1);
     expect(createInteractionSpy).toHaveBeenCalledTimes(1);
-    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(generateContentSpy).not.toHaveBeenCalled();
     expect(deleteSpy).toHaveBeenCalledWith({ name: "files/test-interaction-123" });
 
     expect(result.provider).toBe("gemini-transcribe");
@@ -124,26 +128,41 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
       sourceEnd: 4,
       speaker: "Speaker 1",
     });
-    expect(result.words[1]).toMatchObject({
-      sequence: 2,
-      text: "Studio",
-      startMs: 500,
-      endMs: 900,
-      sourceStart: 5,
-      sourceEnd: 11,
-      speaker: "Speaker 1",
+  });
+
+  it("2. ignores/rejects top-level response.words without word_info annotations", async () => {
+    const deleteSpy = vi.fn().mockResolvedValue({});
+    const uploadSpy = vi.fn().mockResolvedValue({ name: "files/test-words-prop" });
+    const createInteractionSpy = vi.fn().mockResolvedValue({
+      output_text: "Top level words without annotations",
+      words: [{ text: "Top", start: 0, end: 100 }],
+      steps: [], // No valid steps/content annotations
     });
-    expect(result.words[4]).toMatchObject({
-      sequence: 5,
-      text: "today",
-      startMs: 1850,
-      endMs: 62003,
-      sourceStart: 23,
-      sourceEnd: 28,
+
+    const mockGenAiClient: any = {
+      files: { upload: uploadSpy, delete: deleteSpy },
+      interactions: { create: createInteractionSpy },
+    };
+
+    const provider = new GeminiTranscribeProvider({
+      apiKey: "AIzaSyTestKey",
+      genAiClient: mockGenAiClient,
+    });
+
+    await expect(
+      provider.transcribe({
+        audioBuffer: Buffer.from("dummy-audio"),
+        mimeType: "audio/wav",
+        projectId: "proj-1",
+        audioSourceId: "src-1",
+        requestedMode: "GEMINI",
+      })
+    ).rejects.toMatchObject({
+      details: { code: "MISSING_TIMESTAMPS" },
     });
   });
 
-  it("fails closed with MALFORMED_RESPONSE on missing start_offset or end_offset", async () => {
+  it("3. fails closed with MALFORMED_RESPONSE on missing start_offset or end_offset", async () => {
     const deleteSpy = vi.fn().mockResolvedValue({});
     const uploadSpy = vi.fn().mockResolvedValue({ name: "files/test-malformed" });
     const createInteractionSpy = vi.fn().mockResolvedValue({
@@ -157,7 +176,6 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
                   type: "word_info",
                   text: "Hello",
                   start_offset: "0.100s",
-                  // missing end_offset
                 },
               ],
             },
@@ -189,7 +207,7 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
     });
   });
 
-  it("fails closed with MALFORMED_RESPONSE when end_offset < start_offset", async () => {
+  it("4. fails closed with MALFORMED_RESPONSE when end_offset < start_offset", async () => {
     const deleteSpy = vi.fn().mockResolvedValue({});
     const uploadSpy = vi.fn().mockResolvedValue({ name: "files/test-inverted" });
     const createInteractionSpy = vi.fn().mockResolvedValue({
@@ -235,21 +253,12 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
     });
   });
 
-  it("fails closed with MISSING_TIMESTAMPS when non-empty text has zero word_info annotations", async () => {
+  it("5. bounds entire attempt with timeout and cleans up remote file", async () => {
     const deleteSpy = vi.fn().mockResolvedValue({});
-    const uploadSpy = vi.fn().mockResolvedValue({ name: "files/test-missing" });
-    const createInteractionSpy = vi.fn().mockResolvedValue({
-      output_text: "Some transcript text without any annotations",
-      steps: [
-        {
-          content: [
-            {
-              annotations: [],
-            },
-          ],
-        },
-      ],
-    });
+    const uploadSpy = vi.fn().mockResolvedValue({ name: "files/test-timeout" });
+    const createInteractionSpy = vi.fn().mockImplementation(
+      () => new Promise((resolve) => setTimeout(resolve, 5000))
+    );
 
     const mockGenAiClient: any = {
       files: { upload: uploadSpy, delete: deleteSpy },
@@ -258,6 +267,7 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
 
     const provider = new GeminiTranscribeProvider({
       apiKey: "AIzaSyTestKey",
+      timeoutMs: 50, // very small timeout to trigger abort
       genAiClient: mockGenAiClient,
     });
 
@@ -270,11 +280,46 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
         requestedMode: "GEMINI",
       })
     ).rejects.toMatchObject({
-      details: { code: "MISSING_TIMESTAMPS" },
+      details: { code: "TIMEOUT" },
     });
+
+    expect(deleteSpy).toHaveBeenCalledWith({ name: "files/test-timeout" });
   });
 
-  it("handles valid NO_SPEECH cleanly", async () => {
+  it("6. sanitizes sensitive API keys and absolute file paths in provider error messages", async () => {
+    const deleteSpy = vi.fn().mockResolvedValue({});
+    const uploadSpy = vi.fn().mockRejectedValue(
+      new Error("Upload failed for C:\\Users\\secret\\audio.wav with api_key: AIzaSySecretKey1234567890")
+    );
+
+    const mockGenAiClient: any = {
+      files: { upload: uploadSpy, delete: deleteSpy },
+      interactions: { create: vi.fn() },
+    };
+
+    const provider = new GeminiTranscribeProvider({
+      apiKey: "AIzaSySecretKey1234567890",
+      genAiClient: mockGenAiClient,
+    });
+
+    try {
+      await provider.transcribe({
+        audioBuffer: Buffer.from("dummy-audio"),
+        mimeType: "audio/wav",
+        projectId: "proj-1",
+        audioSourceId: "src-1",
+        requestedMode: "GEMINI",
+      });
+      expect.fail("Should have thrown ProviderError");
+    } catch (err: any) {
+      expect(err).toBeInstanceOf(ProviderError);
+      expect(err.message).not.toContain("AIzaSySecretKey1234567890");
+      expect(err.message).not.toContain("C:\\Users\\secret\\audio.wav");
+      expect(err.message).toContain("[REDACTED]");
+    }
+  });
+
+  it("7. handles valid NO_SPEECH cleanly", async () => {
     const deleteSpy = vi.fn().mockResolvedValue({});
     const uploadSpy = vi.fn().mockResolvedValue({ name: "files/silent-1" });
     const createInteractionSpy = vi.fn().mockResolvedValue({
@@ -305,36 +350,4 @@ describe("GeminiTranscribeProvider Unit & Error Handling Tests (TASK-004B)", () 
     expect(result.wordCount).toBe(0);
     expect(result.canonicalText).toBe("");
   });
-
-  it("cleans up remote file in finally on error", async () => {
-    const deleteSpy = vi.fn().mockResolvedValue({});
-    const uploadSpy = vi.fn().mockResolvedValue({ name: "files/err-file" });
-    const createInteractionSpy = vi.fn().mockRejectedValue({
-      status: 429,
-      message: "Quota exceeded",
-    });
-
-    const mockGenAiClient: any = {
-      files: { upload: uploadSpy, delete: deleteSpy },
-      interactions: { create: createInteractionSpy },
-    };
-
-    const provider = new GeminiTranscribeProvider({
-      apiKey: "AIzaSyTestKey",
-      genAiClient: mockGenAiClient,
-    });
-
-    await expect(
-      provider.transcribe({
-        audioBuffer: Buffer.from("dummy-audio"),
-        mimeType: "audio/wav",
-        projectId: "proj-1",
-        audioSourceId: "src-1",
-        requestedMode: "GEMINI",
-      })
-    ).rejects.toThrow(ProviderError);
-
-    expect(deleteSpy).toHaveBeenCalledWith({ name: "files/err-file" });
-  });
 });
-

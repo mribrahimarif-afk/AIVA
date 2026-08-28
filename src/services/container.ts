@@ -121,6 +121,7 @@ const directorServiceInstance = createDirectorService({
   projectRepository: repositories.project,
   brandRepository: repositories.brand,
   productRepository: repositories.product,
+  audioSourceRepository: repositories.audioSource,
   directorAiProvider,
   logger,
   maxScriptChars: env.DIRECTOR_MAX_SCRIPT_CHARS,
@@ -135,6 +136,15 @@ const transcriptionServiceInstance = new TranscriptionService({
   directorService: directorServiceInstance,
   logger,
   maxAudioBytes: env.TRANSCRIBE_MAX_AUDIO_BYTES,
+  runtimeSemantics: {
+    geminiModel: geminiTranscribeProvider.modelName,
+    azureModel: azureTranscribeProvider.modelName,
+    elevenLabsModel: elevenLabsTranscribeProvider.modelName,
+    routingPolicyVersion: "v1",
+    canonicalBuilderVersion: "v1",
+    languageHints: [],
+    vocabularyHash: null,
+  },
 });
 
 export const services = {

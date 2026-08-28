@@ -17,7 +17,9 @@ import type {
   ProjectRepository,
   BrandRepository,
   ProductRepository,
+  AudioSourceRepository,
 } from "@/repositories";
+import { isDirectorPlanCurrent } from "@/domain/director";
 import type {
   DirectorAiProvider,
   BrandContextForDirector,
@@ -31,6 +33,7 @@ export interface DirectorServiceOptions {
   projectRepository: ProjectRepository;
   brandRepository: BrandRepository;
   productRepository: ProductRepository;
+  audioSourceRepository?: AudioSourceRepository;
   directorAiProvider: DirectorAiProvider;
   logger: Logger;
   maxScriptChars?: number;
@@ -48,6 +51,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
     projectRepository,
     brandRepository,
     productRepository,
+    audioSourceRepository,
     directorAiProvider,
     logger,
     maxScriptChars = 50000,
@@ -63,7 +67,23 @@ export function createDirectorService(options: DirectorServiceOptions): Director
       if (!project) {
         throw new NotFoundError("Project not found", { projectId });
       }
-      return directorPlanRepository.findByProjectId(projectId);
+      const plan = await directorPlanRepository.findByProjectId(projectId);
+      if (!plan) return null;
+
+      if (plan.sourceType === "AUDIO_TRANSCRIPT" && audioSourceRepository) {
+        const sources = await audioSourceRepository.findByProjectId(projectId);
+        const activeTranscriptionId = sources.find((s) => s.activeTranscriptionId)?.activeTranscriptionId ?? null;
+        const isCurrent = isDirectorPlanCurrent(plan, { activeTranscriptionId });
+        return {
+          ...plan,
+          isCurrent,
+        };
+      }
+
+      return {
+        ...plan,
+        isCurrent: true,
+      };
     },
 
     async analyzeAndPlan(projectId: string, input: AnalyzeScriptInput): Promise<DirectorPlan> {

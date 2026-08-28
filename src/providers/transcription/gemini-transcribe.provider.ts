@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { ProviderError } from "@/domain/errors";
+import { ProviderError, ValidationError } from "@/domain/errors";
 import {
   buildCanonicalTranscript,
   assertValidTranscriptionWords,
@@ -19,6 +19,24 @@ export interface GeminiTranscribeProviderOptions {
   timeoutMs?: number;
   logger?: Logger;
   genAiClient?: GoogleGenAI;
+}
+
+/**
+ * Strips secrets, file paths, and raw JSON bodies from provider error messages.
+ */
+function sanitizeErrorMessage(rawMessage: string): string {
+  let msg = rawMessage;
+  // Strip API keys
+  msg = msg.replace(/\b(?:AIza|sk-|ghp_|AKIA|xoxb)[A-Za-z0-9\-_]{8,}\b/g, "[REDACTED]");
+  msg = msg.replace(/((?:api[-_]?key|key|secret|token)\s*[:=]\s*)([^\s"'&,;]+)/gi, "$1[REDACTED]");
+  // Strip local absolute file paths (Windows & POSIX)
+  msg = msg.replace(/[A-Za-z]:\\[^:\s"'<>]+\.[A-Za-z0-9]+/g, "[FILE_PATH]");
+  msg = msg.replace(/\/(?:[a-zA-Z0-9._-]+\/)+[a-zA-Z0-9._-]+\.[A-Za-z0-9]+/g, "[FILE_PATH]");
+  // Truncate long raw json payloads
+  if (msg.length > 250) {
+    msg = msg.substring(0, 250) + "...";
+  }
+  return msg;
 }
 
 export class GeminiTranscribeProvider implements TranscriptionProvider {
@@ -63,79 +81,84 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
     const startTime = Date.now();
     let uploadedFileName: string | undefined;
 
+    // Overall request-scoped abort controller and deadline
+    const abortController = new AbortController();
+    let isTimedOut = false;
+    const timeoutHandle = setTimeout(() => {
+      isTimedOut = true;
+      abortController.abort();
+    }, this.timeoutMs);
+
     try {
-      // 1. Upload audio to Gemini Files API
-      // Create a Blob from the Buffer for the Files API
-      const audioBlob: Blob = new Blob([new Uint8Array(audioBuffer)], { type: mimeType });
-      const fileUploadResult = await this.client.files.upload({
-        file: audioBlob,
+      // 1. Upload audio buffer via Google GenAI Files API
+      const uint8 = new Uint8Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.byteLength);
+      const blob = new Blob([uint8 as unknown as BlobPart], { type: mimeType });
+      const uploadedFile = await this.client.files.upload({
+        file: blob,
       });
+      uploadedFileName = uploadedFile.name;
 
-      uploadedFileName = fileUploadResult.name;
+      if (!uploadedFileName) {
+        throw new ProviderError(this.id, "Gemini Files upload did not return a valid file identifier", {
+          code: "MALFORMED_RESPONSE",
+        });
+      }
 
-      // 2. Execute Transcription interaction with verbatim mode & word-level timestamps
-      let response: Record<string, unknown>;
+      // Check deadline budget before interactions.create
+      const elapsedSoFarMs = Date.now() - startTime;
+      if (elapsedSoFarMs >= this.timeoutMs || abortController.signal.aborted) {
+        throw new ProviderError(this.id, `Gemini transcription request exceeded deadline of ${this.timeoutMs}ms`, {
+          code: "TIMEOUT",
+        });
+      }
+
+      // 2. Execute Transcription interaction with verbatim mode & word-level timestamps ONLY
       const clientAny = this.client as unknown as Record<string, unknown>;
 
       if (
-        clientAny.interactions &&
-        typeof (clientAny.interactions as { create?: unknown }).create === "function"
+        !clientAny.interactions ||
+        typeof (clientAny.interactions as { create?: unknown }).create !== "function"
       ) {
-        response = (await (
-          clientAny.interactions as {
-            create: (params: unknown) => Promise<Record<string, unknown>>;
-          }
-        ).create({
-          model: this.modelName,
-          input: [
-            {
-              type: "audio",
-              file_uri: fileUploadResult.uri,
-              mime_type: fileUploadResult.mimeType || mimeType,
-            },
-          ],
-          generation_config: {
-            transcription_config: {
-              mode: {
-                type: "verbatim",
-                timestamp_granularities: ["word"],
-              },
-            },
-          },
-        })) as Record<string, unknown>;
-      } else {
-        const genResponse = await this.client.models.generateContent({
-          model: this.modelName,
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  fileData: {
-                    fileUri: fileUploadResult.uri,
-                    mimeType: fileUploadResult.mimeType || mimeType,
-                  },
-                },
-                {
-                  text: "Transcribe the spoken audio verbatim. Return word-level timestamps.",
-                },
-              ],
-            },
-          ],
-          config: {
-            responseMimeType: "application/json",
-          },
-        });
-
-        const responseText = genResponse.text || "";
-        try {
-          response = JSON.parse(responseText) as Record<string, unknown>;
-        } catch {
-          response = genResponse as unknown as Record<string, unknown>;
-        }
+        throw new ProviderError(
+          this.id,
+          "Gemini 3.5 Transcribe Interactions API is not available on GenAI client. Canonical transcription requires interactions.create.",
+          { code: "UPSTREAM_UNAVAILABLE" }
+        );
       }
 
-      // 3. Extract word timestamps and text from official interaction structure
+      const interactionPromise = (
+        clientAny.interactions as {
+          create: (params: unknown) => Promise<Record<string, unknown>>;
+        }
+      ).create({
+        model: this.modelName,
+        input: [
+          {
+            type: "audio",
+            file_uri: uploadedFile.uri,
+            mime_type: uploadedFile.mimeType || mimeType,
+          },
+        ],
+        generation_config: {
+          transcription_config: {
+            mode: {
+              type: "verbatim",
+              timestamp_granularities: ["word"],
+            },
+          },
+        },
+      });
+
+      const response = await Promise.race([
+        interactionPromise,
+        new Promise<never>((_, reject) => {
+          abortController.signal.addEventListener("abort", () => {
+            reject(new ProviderError(this.id, "Gemini transcription interaction timed out", { code: "TIMEOUT" }));
+          });
+        }),
+      ]);
+
+      // 3. Extract word timestamps and text STRICTLY from official interaction structure
       const rawWords: RawTranscriptionWord[] = [];
       let detectedLanguage: string | null = null;
       let displayText = "";
@@ -157,96 +180,79 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
           ? ((response as { interaction: { steps: unknown[] } }).interaction.steps as unknown[])
           : null;
 
-      if (steps && Array.isArray(steps)) {
-        for (const stepItem of steps) {
-          const step = stepItem as { content?: unknown[] };
-          if (!Array.isArray(step?.content)) continue;
-
-          for (const contentItem of step.content) {
-            const content = contentItem as { annotations?: unknown[]; text?: string };
-            if (typeof content?.text === "string" && !displayText) {
-              displayText = content.text;
-            }
-
-            if (!Array.isArray(content?.annotations)) continue;
-
-            for (const annotationItem of content.annotations) {
-              const ann = annotationItem as Record<string, unknown>;
-              if (ann?.type === "word_info") {
-                const text = String(ann.text ?? "").trim();
-                if (!text) continue;
-
-                const startMs = this.parseOffsetToMs(
-                  ann.start_offset ?? ann.startOffset ?? ann.start
-                );
-                const endMs = this.parseOffsetToMs(
-                  ann.end_offset ?? ann.endOffset ?? ann.end
-                );
-
-                if (startMs === null || endMs === null) {
-                  throw new ProviderError(
-                    this.id,
-                    `Malformed or missing timestamp offset in Gemini word_info annotation: start=${String(ann.start_offset)}, end=${String(ann.end_offset)}`,
-                    { code: "MALFORMED_RESPONSE" }
-                  );
-                }
-
-                if (endMs < startMs) {
-                  throw new ProviderError(
-                    this.id,
-                    `Invalid timing in Gemini word_info annotation: end (${endMs}ms) < start (${startMs}ms)`,
-                    { code: "MALFORMED_RESPONSE" }
-                  );
-                }
-
-                rawWords.push({
-                  text,
-                  startMs,
-                  endMs,
-                  speaker: typeof ann.speaker === "string" ? ann.speaker : null,
-                  confidence: typeof ann.confidence === "number" ? ann.confidence : null,
-                });
-              }
-            }
-          }
+      if (!steps || !Array.isArray(steps) || steps.length === 0) {
+        // If output_text is empty or noSpeech is signaled
+        if (response.noSpeech === true || displayText.trim() === "") {
+          return {
+            provider: this.id,
+            model: this.modelName,
+            requestedMode,
+            displayText: "",
+            canonicalText: "",
+            detectedLanguage: null,
+            durationMs: 0,
+            wordCount: 0,
+            words: [],
+            noSpeech: true,
+          };
         }
-      } else if (Array.isArray(response.words)) {
-        // Direct word list fallback if provided
-        for (const item of response.words) {
-          const w = item as Record<string, unknown>;
-          const text = String(w.text || w.word || "").trim();
-          if (!text) continue;
+        throw new ProviderError(
+          this.id,
+          "Gemini transcription interaction returned no steps/content annotations for spoken audio",
+          { code: "MISSING_TIMESTAMPS" }
+        );
+      }
 
-          const startMs = this.parseOffsetToMs(
-            w.start_offset ?? w.startOffset ?? w.start ?? w.startMs
-          );
-          const endMs = this.parseOffsetToMs(
-            w.end_offset ?? w.endOffset ?? w.end ?? w.endMs
-          );
+      for (const stepItem of steps) {
+        const step = stepItem as { content?: unknown[] };
+        if (!Array.isArray(step?.content)) continue;
 
-          if (startMs === null || endMs === null) {
-            throw new ProviderError(
-              this.id,
-              `Malformed or missing timestamp in Gemini word list: start=${String(w.start)}, end=${String(w.end)}`,
-              { code: "MALFORMED_RESPONSE" }
-            );
+        for (const contentItem of step.content) {
+          const content = contentItem as { annotations?: unknown[]; text?: string };
+          if (typeof content?.text === "string" && !displayText) {
+            displayText = content.text;
           }
 
-          if (endMs < startMs) {
-            throw new ProviderError(
-              this.id,
-              `Invalid timing in Gemini word list: end (${endMs}ms) < start (${startMs}ms)`,
-              { code: "MALFORMED_RESPONSE" }
-            );
-          }
+          if (!Array.isArray(content?.annotations)) continue;
 
-          rawWords.push({
-            text,
-            startMs,
-            endMs,
-            speaker: typeof w.speaker === "string" ? w.speaker : null,
-            confidence: typeof w.confidence === "number" ? w.confidence : null,
-          });
+          for (const annotationItem of content.annotations) {
+            const ann = annotationItem as Record<string, unknown>;
+            if (ann?.type === "word_info") {
+              const text = String(ann.text ?? "").trim();
+              if (!text) continue;
+
+              const startMs = this.parseOffsetToMs(
+                ann.start_offset ?? ann.startOffset ?? ann.start
+              );
+              const endMs = this.parseOffsetToMs(
+                ann.end_offset ?? ann.endOffset ?? ann.end
+              );
+
+              if (startMs === null || endMs === null) {
+                throw new ProviderError(
+                  this.id,
+                  `Malformed or missing timestamp offset in Gemini word_info annotation: start=${String(ann.start_offset)}, end=${String(ann.end_offset)}`,
+                  { code: "MALFORMED_RESPONSE" }
+                );
+              }
+
+              if (endMs < startMs) {
+                throw new ProviderError(
+                  this.id,
+                  `Invalid timing in Gemini word_info annotation: end (${endMs}ms) < start (${startMs}ms)`,
+                  { code: "MALFORMED_RESPONSE" }
+                );
+              }
+
+              rawWords.push({
+                text,
+                startMs,
+                endMs,
+                speaker: typeof ann.speaker === "string" ? ann.speaker : null,
+                confidence: typeof ann.confidence === "number" ? ann.confidence : null,
+              });
+            }
+          }
         }
       }
 
@@ -312,6 +318,9 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
       if (err instanceof ProviderError) {
         throw err;
       }
+      if (err instanceof ValidationError) {
+        throw new ProviderError(this.id, err.message, { code: "MALFORMED_RESPONSE" });
+      }
 
       const error =
         typeof err === "object" && err !== null
@@ -325,12 +334,14 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
             : typeof error.httpStatus === "number"
               ? error.httpStatus
               : undefined;
-      const message =
+      const rawMessage =
         err instanceof Error
           ? err.message
           : typeof error.message === "string"
             ? error.message
             : "Gemini transcription request failed";
+
+      const sanitizedMessage = sanitizeErrorMessage(rawMessage);
 
       let code = "UPSTREAM_UNAVAILABLE";
       if (status === 400) code = "INVALID_REQUEST";
@@ -339,11 +350,12 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
       else if (status === 404) code = "MODEL_UNAVAILABLE";
       else if (status === 429) code = "RATE_LIMITED";
       else if (
+        isTimedOut ||
         (err instanceof Error && err.name === "AbortError") ||
-        message.includes("timeout")
+        rawMessage.toLowerCase().includes("timeout")
       )
         code = "TIMEOUT";
-      else if (message.includes("fetch failed") || message.includes("network"))
+      else if (rawMessage.toLowerCase().includes("fetch failed") || rawMessage.toLowerCase().includes("network"))
         code = "NETWORK_FAILURE";
 
       this.logger?.warn({
@@ -356,12 +368,13 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
         elapsedMs: Date.now() - startTime,
       });
 
-      throw new ProviderError(this.id, `Gemini transcription failed (${code}): ${message}`, {
+      throw new ProviderError(this.id, `Gemini transcription failed (${code}): ${sanitizedMessage}`, {
         code,
         status,
         provider: this.id,
       });
     } finally {
+      clearTimeout(timeoutHandle);
       // 6. Explicit best-effort cleanup of remote Gemini file in finally
       if (uploadedFileName && this.client) {
         try {
@@ -383,7 +396,6 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
     }
     if (typeof value === "number") {
       if (!Number.isFinite(value) || value < 0) return null;
-      // If integer > 10000, treat as already ms; otherwise convert seconds to ms
       return Number.isInteger(value) && value > 10000
         ? value
         : Math.round(value * (value < 1000 ? 1000 : 1));

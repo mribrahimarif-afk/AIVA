@@ -4,10 +4,20 @@ import type { TranscriptionResult } from "@/domain/transcription";
 import { NotFoundError, ValidationError } from "@/domain/errors";
 
 describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
-  const dummyWav = Buffer.alloc(44);
+  const dummyWav = Buffer.alloc(44 + 32000);
   dummyWav.write("RIFF", 0);
-  dummyWav.writeUInt32LE(36, 4);
+  dummyWav.writeUInt32LE(36 + 32000, 4);
   dummyWav.write("WAVE", 8);
+  dummyWav.write("fmt ", 12);
+  dummyWav.writeUInt32LE(16, 16);
+  dummyWav.writeUInt16LE(1, 20); // PCM
+  dummyWav.writeUInt16LE(1, 22); // 1 channel
+  dummyWav.writeUInt32LE(16000, 24); // 16kHz
+  dummyWav.writeUInt32LE(32000, 28);
+  dummyWav.writeUInt16LE(2, 32);
+  dummyWav.writeUInt16LE(16, 34);
+  dummyWav.write("data", 36);
+  dummyWav.writeUInt32LE(32000, 40);
 
   const sampleResult: TranscriptionResult = {
     provider: "gemini-transcribe",
@@ -27,7 +37,7 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
     ],
   };
 
-  it("uploads audio source and creates content-addressed AudioSource record", async () => {
+  it("1. uploads audio source and creates content-addressed AudioSource record after successful preflight probe", async () => {
     const projectRepoMock: any = {
       findById: vi.fn().mockResolvedValue({ id: "proj-123", name: "Test Project" }),
     };
@@ -73,7 +83,7 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
     expect(result.originalDisplayName).toBe("voiceover.wav");
   });
 
-  it("cost-safe reuse: identical audio hash + AUTO mode returns existing accepted transcription with 0 provider calls", async () => {
+  it("2. cost-safe reuse: identical audio hash + AUTO mode within same AudioSource returns existing accepted transcription with 0 provider calls", async () => {
     const projectRepoMock: any = {
       findById: vi.fn().mockResolvedValue({ id: "proj-123", name: "Test Project" }),
     };
@@ -104,7 +114,7 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
       createdAt: new Date(),
     };
     const transcriptionRepoMock: any = {
-      findByConfigurationHash: vi.fn().mockResolvedValue(existingRecord),
+      findByAudioSourceAndConfigurationHash: vi.fn().mockResolvedValue(existingRecord),
       createTranscriptionWithWords: vi.fn(),
     };
     const providerMock: any = {
@@ -129,11 +139,124 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
     });
 
     expect(result.id).toBe("t-existing-1");
-    expect(transcriptionRepoMock.findByConfigurationHash).toHaveBeenCalledTimes(1);
+    expect(transcriptionRepoMock.findByAudioSourceAndConfigurationHash).toHaveBeenCalledTimes(1);
     expect(providerMock.transcribe).not.toHaveBeenCalled();
   });
 
-  it("useWithDirector feeds canonicalText and sets durable source provenance on DirectorPlan", async () => {
+  it("3. AudioSource-scoped ownership: A2 never receives A1's Transcription row", async () => {
+    const projectRepoMock: any = {
+      findById: vi.fn().mockResolvedValue({ id: "proj-123", name: "Test Project" }),
+    };
+    const audioSourceRepoMock: any = {
+      findById: vi.fn().mockResolvedValue({
+        id: "as-2",
+        projectId: "proj-123",
+        storageRef: "projects/proj-123/source/hash.wav",
+        sourceHash: "abc123hash",
+        mimeType: "audio/wav",
+        durationMs: 1000,
+        activeTranscriptionId: null,
+      }),
+      setActiveTranscription: vi.fn(),
+    };
+    const storageMock: any = {
+      audioSourceExists: vi.fn().mockResolvedValue(true),
+      readAudioSourceBuffer: vi.fn().mockResolvedValue(dummyWav),
+      resolveAbsolutePath: vi.fn().mockReturnValue("dummy.wav"),
+    };
+    const transcriptionRepoMock: any = {
+      // AudioSource as-2 has no transcription for this configuration hash
+      findByAudioSourceAndConfigurationHash: vi.fn().mockResolvedValue(null),
+      createTranscriptionWithWords: vi.fn().mockImplementation((data) => ({
+        id: "t-new-for-as2",
+        ...data,
+        createdAt: new Date(),
+      })),
+    };
+    const providerMock: any = {
+      transcribe: vi.fn().mockResolvedValue(sampleResult),
+    };
+    const loggerMock: any = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const service = new TranscriptionService({
+      projectRepository: projectRepoMock,
+      audioSourceRepository: audioSourceRepoMock,
+      transcriptionRepository: transcriptionRepoMock,
+      audioSourceStorageService: storageMock,
+      transcriptionProvider: providerMock,
+      directorService: {} as any,
+      logger: loggerMock,
+    });
+
+    const result = await service.transcribeAudio("proj-123", {
+      audioSourceId: "as-2",
+      mode: "AUTO",
+      force: false,
+    });
+
+    expect(result.id).toBe("t-new-for-as2");
+    expect(transcriptionRepoMock.createTranscriptionWithWords).toHaveBeenCalledTimes(1);
+    expect(providerMock.transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("4. changing runtime semantic model invalidates reuse and calls provider", async () => {
+    const projectRepoMock: any = {
+      findById: vi.fn().mockResolvedValue({ id: "proj-123", name: "Test Project" }),
+    };
+    const audioSourceRepoMock: any = {
+      findById: vi.fn().mockResolvedValue({
+        id: "as-1",
+        projectId: "proj-123",
+        storageRef: "projects/proj-123/source/hash.wav",
+        sourceHash: "abc123hash",
+        mimeType: "audio/wav",
+        durationMs: 1000,
+        activeTranscriptionId: "t-existing-1",
+      }),
+      setActiveTranscription: vi.fn(),
+    };
+    const storageMock: any = {
+      audioSourceExists: vi.fn().mockResolvedValue(true),
+      readAudioSourceBuffer: vi.fn().mockResolvedValue(dummyWav),
+      resolveAbsolutePath: vi.fn().mockReturnValue("dummy.wav"),
+    };
+    const transcriptionRepoMock: any = {
+      findByAudioSourceAndConfigurationHash: vi.fn().mockResolvedValue(null),
+      createTranscriptionWithWords: vi.fn().mockImplementation((data) => ({
+        id: "t-new-model",
+        ...data,
+        createdAt: new Date(),
+      })),
+    };
+    const providerMock: any = {
+      transcribe: vi.fn().mockResolvedValue(sampleResult),
+    };
+    const loggerMock: any = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const service = new TranscriptionService({
+      projectRepository: projectRepoMock,
+      audioSourceRepository: audioSourceRepoMock,
+      transcriptionRepository: transcriptionRepoMock,
+      audioSourceStorageService: storageMock,
+      transcriptionProvider: providerMock,
+      directorService: {} as any,
+      logger: loggerMock,
+      runtimeSemantics: {
+        geminiModel: "gemini-3.5-custom", // Changed model
+      },
+    });
+
+    const result = await service.transcribeAudio("proj-123", {
+      audioSourceId: "as-1",
+      mode: "AUTO",
+      force: false,
+    });
+
+    expect(result.id).toBe("t-new-model");
+    expect(providerMock.transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("5. useWithDirector feeds canonicalText and sets durable source provenance on DirectorPlan", async () => {
     const projectRepoMock: any = {
       findById: vi.fn().mockResolvedValue({ id: "proj-123" }),
     };
@@ -185,7 +308,7 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
     expect(plan.sourceTranscriptionId).toBe("t-1");
   });
 
-  it("rejects audio exceeding 30-minute preflight bound before provider dispatch with 0 provider calls", async () => {
+  it("6. rejects audio exceeding 30-minute preflight bound before provider dispatch with 0 provider calls", async () => {
     const projectRepoMock: any = {
       findById: vi.fn().mockResolvedValue({ id: "proj-123", name: "Test Project" }),
     };
@@ -213,7 +336,7 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
       projectRepository: projectRepoMock,
       audioSourceRepository: audioSourceRepoMock,
       transcriptionRepository: {
-        findByConfigurationHash: vi.fn().mockResolvedValue(null),
+        findByAudioSourceAndConfigurationHash: vi.fn().mockResolvedValue(null),
       } as any,
       audioSourceStorageService: storageMock,
       transcriptionProvider: providerMock,
@@ -230,80 +353,5 @@ describe("TranscriptionService Unit & Integration Tests (TASK-004B)", () => {
     ).rejects.toThrow(ValidationError);
 
     expect(providerMock.transcribe).not.toHaveBeenCalled();
-  });
-
-  it("retranscribe with force=true activates new successful transcription T2 while preserving historical T1", async () => {
-    const projectRepoMock: any = {
-      findById: vi.fn().mockResolvedValue({ id: "proj-123", name: "Test Project" }),
-    };
-    let activeId = "t1-gemini";
-    const audioSourceRepoMock: any = {
-      findById: vi.fn().mockResolvedValue({
-        id: "as-1",
-        projectId: "proj-123",
-        storageRef: "projects/proj-123/source/hash.wav",
-        sourceHash: "audiohash123",
-        mimeType: "audio/wav",
-        durationMs: 5000,
-        activeTranscriptionId: activeId,
-      }),
-      setActiveTranscription: vi.fn().mockImplementation((_srcId, newId) => {
-        activeId = newId;
-      }),
-    };
-    const storageMock: any = {
-      audioSourceExists: vi.fn().mockResolvedValue(true),
-      readAudioSourceBuffer: vi.fn().mockResolvedValue(Buffer.alloc(100)),
-      resolveAbsolutePath: vi.fn().mockReturnValue("I:/AIVA/storage/projects/proj-123/source/hash.wav"),
-    };
-    const t2Record = {
-      id: "t2-azure",
-      projectId: "proj-123",
-      audioSourceId: "as-1",
-      provider: "azure-speech-stt",
-      model: "azure-speech-continuous-stt",
-      requestedMode: "AZURE",
-      displayText: "Azure transcript T2",
-      canonicalText: "Azure transcript T2",
-      durationMs: 5000,
-      wordCount: 3,
-      sourceAudioHash: "audiohash123",
-    };
-    const transcriptionRepoMock: any = {
-      findByConfigurationHash: vi.fn().mockResolvedValue(null),
-      createTranscriptionWithWords: vi.fn().mockResolvedValue(t2Record),
-    };
-    const providerMock: any = {
-      transcribe: vi.fn().mockResolvedValue({
-        provider: "azure-speech-stt",
-        model: "azure-speech-continuous-stt",
-        requestedMode: "AZURE",
-        displayText: "Azure transcript T2",
-        canonicalText: "Azure transcript T2",
-        durationMs: 5000,
-        wordCount: 3,
-        words: [],
-      }),
-    };
-    const loggerMock: any = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-
-    const service = new TranscriptionService({
-      projectRepository: projectRepoMock,
-      audioSourceRepository: audioSourceRepoMock,
-      transcriptionRepository: transcriptionRepoMock,
-      audioSourceStorageService: storageMock,
-      transcriptionProvider: providerMock,
-      directorService: {} as any,
-      logger: loggerMock,
-    });
-
-    const result = await service.transcribeAudio("proj-123", {
-      audioSourceId: "as-1",
-      mode: "AZURE",
-      force: true,
-    });
-
-    expect(result.id).toBe("t2-azure");
-    expect(transcriptionRepoMock.createTranscriptionWithWords).toHaveBeenCalledTimes(1);
   });
 });

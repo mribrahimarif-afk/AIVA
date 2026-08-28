@@ -3,6 +3,7 @@ import type {
   TranscriptionRecord,
   TranscriptionWord,
 } from "@/domain/transcription";
+import { NotFoundError } from "@/domain/errors";
 
 export interface CreateTranscriptionInput {
   projectId: string;
@@ -29,6 +30,10 @@ export interface TranscriptionRepository {
     projectId: string,
     configurationHash: string
   ): Promise<TranscriptionRecord | null>;
+  findByAudioSourceAndConfigurationHash(
+    audioSourceId: string,
+    configurationHash: string
+  ): Promise<TranscriptionRecord | null>;
   findByAudioSourceId(audioSourceId: string): Promise<TranscriptionRecord[]>;
   findByProjectId(projectId: string): Promise<TranscriptionRecord[]>;
 }
@@ -40,6 +45,16 @@ export function createTranscriptionRepository(db: PrismaClient): TranscriptionRe
       words: TranscriptionWord[]
     ): Promise<TranscriptionRecord> {
       return db.$transaction(async (tx) => {
+        // Verify AudioSource exists and belongs to the project
+        const audioSource = await tx.audioSource.findUnique({
+          where: { id: data.audioSourceId },
+        });
+        if (!audioSource || audioSource.projectId !== data.projectId) {
+          throw new NotFoundError(
+            `AudioSource ${data.audioSourceId} not found for project ${data.projectId}`
+          );
+        }
+
         // 1. Create main Transcription record
         const transcription = await tx.transcription.create({
           data: {
@@ -174,6 +189,56 @@ export function createTranscriptionRepository(db: PrismaClient): TranscriptionRe
       const record = await db.transcription.findFirst({
         where: {
           projectId,
+          configurationHash: configurationHash.toLowerCase(),
+        },
+        orderBy: { createdAt: "desc" },
+        include: {
+          words: {
+            orderBy: { sequence: "asc" },
+          },
+        },
+      });
+
+      if (!record) return null;
+
+      return {
+        id: record.id,
+        projectId: record.projectId,
+        audioSourceId: record.audioSourceId,
+        provider: record.provider,
+        model: record.model,
+        requestedMode: record.requestedMode,
+        displayText: record.displayText,
+        canonicalText: record.canonicalText,
+        detectedLanguage: record.detectedLanguage,
+        durationMs: record.durationMs,
+        wordCount: record.wordCount,
+        sourceAudioHash: record.sourceAudioHash,
+        configurationHash: record.configurationHash,
+        createdAt: record.createdAt,
+        words: record.words.map((w) => ({
+          id: w.id,
+          transcriptionId: w.transcriptionId,
+          sequence: w.sequence,
+          text: w.text,
+          startMs: w.startMs,
+          endMs: w.endMs,
+          sourceStart: w.sourceStart,
+          sourceEnd: w.sourceEnd,
+          speaker: w.speaker,
+          confidence: w.confidence,
+          locale: w.locale,
+        })),
+      };
+    },
+
+    async findByAudioSourceAndConfigurationHash(
+      audioSourceId: string,
+      configurationHash: string
+    ): Promise<TranscriptionRecord | null> {
+      const record = await db.transcription.findFirst({
+        where: {
+          audioSourceId,
           configurationHash: configurationHash.toLowerCase(),
         },
         orderBy: { createdAt: "desc" },

@@ -22,6 +22,7 @@ export const SUPPORTED_AUDIO_FORMATS: Record<string, SupportedAudioFormat> = {
 
 /**
  * Sniffs the magic bytes from an audio buffer to detect its canonical MIME type and extension.
+ * Returns null if the byte signature does not match any recognized audio container.
  */
 export function detectAudioFormat(buffer: Buffer): { mimeType: string; extension: string } | null {
   if (!buffer || buffer.length < 4) {
@@ -67,6 +68,11 @@ export function detectAudioFormat(buffer: Buffer): { mimeType: string; extension
     return { mimeType: "audio/mp4", extension: ".m4a" };
   }
 
+  // 7. AAC ADTS frame sync (0xFF 0xF1 or 0xFF 0xF9)
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] !== undefined && (buffer[1] & 0xf6) === 0xf0) {
+    return { mimeType: "audio/aac", extension: ".aac" };
+  }
+
   return null;
 }
 
@@ -89,6 +95,7 @@ export function sanitizeAudioFilename(originalFilename: string | undefined | nul
 
 /**
  * Validates audio file payload by magic bytes, declared MIME type, and size limits.
+ * MIME type is a hint only; actual file evidence (magic bytes) is authoritative.
  */
 export function validateAudioUpload(
   buffer: Buffer,
@@ -106,29 +113,28 @@ export function validateAudioUpload(
     );
   }
 
+  // Caller-supplied MIME and extension are hints only; actual byte signature is mandatory
   const detected = detectAudioFormat(buffer);
+  if (!detected) {
+    throw new ValidationError(
+      `Unsupported audio format. The file signature is unrecognized or corrupted. Declared MIME "${declaredMimeType}" is not supported without valid audio magic bytes.`
+    );
+  }
+
   const normalizedDeclared = declaredMimeType.toLowerCase().trim();
-
-  let finalMime = detected?.mimeType;
-  let finalExt = detected?.extension;
-
-  if (!finalMime || !finalExt) {
-    // If magic bytes were not recognized, check if declared MIME matches allowed list
-    const supported = SUPPORTED_AUDIO_FORMATS[normalizedDeclared];
-    if (!supported) {
-      throw new ValidationError(
-        `Unsupported audio format. Detected signature is unrecognized and declared MIME type "${declaredMimeType}" is not supported.`
-      );
-    }
-    finalMime = supported.mimeType;
-    finalExt = supported.extension;
+  const supported = SUPPORTED_AUDIO_FORMATS[normalizedDeclared];
+  if (normalizedDeclared && !supported) {
+    // If declared MIME was explicitly unsupported, fail validation
+    throw new ValidationError(
+      `Declared MIME type "${declaredMimeType}" is not supported.`
+    );
   }
 
   const safeDisplayName = sanitizeAudioFilename(originalFilename);
 
   return {
-    mimeType: finalMime,
-    extension: finalExt,
+    mimeType: detected.mimeType,
+    extension: detected.extension,
     safeDisplayName,
   };
 }

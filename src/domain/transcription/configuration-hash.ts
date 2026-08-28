@@ -4,6 +4,16 @@ import type { TranscriptionMode } from "./transcription.types";
 export const CANONICAL_BUILDER_VERSION = "v1";
 export const ROUTING_POLICY_VERSION = "v1";
 
+export interface TranscriptionRuntimeSemantics {
+  geminiModel?: string;
+  azureModel?: string;
+  elevenLabsModel?: string;
+  routingPolicyVersion?: string;
+  canonicalBuilderVersion?: string;
+  languageHints?: string[];
+  vocabularyHash?: string | null;
+}
+
 export interface ComputeConfigHashOptions {
   sourceAudioHash: string;
   requestedMode: TranscriptionMode;

@@ -9,6 +9,7 @@ const envSchema = z.object({
   AIVA_STORAGE_ROOT: z.string().trim().min(1).default("./storage"),
   AIVA_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(524288000), // Default: 500 MB limit
   AIVA_FFMPEG_PATH: z.string().trim().optional().default(""),
+  AIVA_FFPROBE_PATH: z.string().trim().optional().default(""),
   AIVA_DEFAULT_ASPECT_RATIO: z.enum(ASPECT_RATIOS).default("9:16"),
   AIVA_LOG_LEVEL: logLevelSchema.default("info"),
   GEMINI_API_KEY: z.string().optional().default(""),

@@ -19,6 +19,22 @@ export interface ResilientTranscribeProviderOptions {
   logger?: Logger;
 }
 
+/**
+ * Strict allowlist of provider-level failure codes eligible for Azure fallback in AUTO mode.
+ */
+export const AUTO_FALLBACK_ELIGIBLE_CODES = new Set<string>([
+  "UNCONFIGURED",
+  "AUTH_FAILED",
+  "FORBIDDEN",
+  "RATE_LIMITED",
+  "TIMEOUT",
+  "NETWORK_FAILURE",
+  "UPSTREAM_UNAVAILABLE",
+  "MODEL_UNAVAILABLE",
+  "MALFORMED_RESPONSE",
+  "MISSING_TIMESTAMPS",
+]);
+
 export class ResilientTranscribeProvider implements TranscriptionProvider {
   readonly id: TranscriptionProviderId = "gemini-transcribe";
   readonly modelName = "resilient-transcription-router";
@@ -77,7 +93,7 @@ export class ResilientTranscribeProvider implements TranscriptionProvider {
         audioSourceId,
         fromProvider: this.geminiProvider.id,
         toProvider: this.azureProvider.id,
-        reason: "GEMINI_UNCONFIGURED",
+        reason: "UNCONFIGURED",
         attemptsUsed: 0,
         elapsedMs: 0,
       });
@@ -98,35 +114,20 @@ export class ResilientTranscribeProvider implements TranscriptionProvider {
     } catch (geminiError: unknown) {
       const elapsedGeminiMs = Date.now() - autoStartTime;
 
-      // Determine if error is an eligible provider failure for Azure fallback
+      // Extract error subcode from details.code or code strictly
       const code =
-        geminiError instanceof ProviderError
-          ? geminiError.code
-          : typeof (geminiError as { code?: unknown })?.code === "string"
+        typeof (geminiError as { details?: { code?: unknown } })?.details?.code === "string"
+          ? String((geminiError as { details: { code: string } }).details.code)
+          : typeof (geminiError as { code?: unknown })?.code === "string" &&
+              (geminiError as { code: string }).code !== "PROVIDER_ERROR"
             ? String((geminiError as { code: string }).code)
-            : "UPSTREAM_UNAVAILABLE";
+            : "GENERIC_ERROR";
 
-      const eligibleCodes = new Set([
-        "UNCONFIGURED",
-        "AUTH_FAILED",
-        "FORBIDDEN",
-        "RATE_LIMITED",
-        "TIMEOUT",
-        "NETWORK_FAILURE",
-        "UPSTREAM_UNAVAILABLE",
-        "MODEL_UNAVAILABLE",
-        "MALFORMED_RESPONSE",
-        "MISSING_TIMESTAMPS",
-        "RECOGNITION_ERROR",
-      ]);
-
-      const isEligible =
-        geminiError instanceof ProviderError ||
-        eligibleCodes.has(code) ||
-        (geminiError instanceof Error && geminiError.name === "ProviderError");
+      // Fallback is ONLY allowed if error code is explicitly in the allowlist
+      const isEligible = AUTO_FALLBACK_ELIGIBLE_CODES.has(code);
 
       if (!isEligible) {
-        // Ineligible failures (e.g. local validation, DB, storage) must NOT trigger fallback
+        // Ineligible failures (e.g. local validation, INVALID_INPUT, INVALID_AUDIO, NO_SPEECH, DB, storage) must NOT trigger fallback
         throw geminiError;
       }
 
@@ -150,15 +151,13 @@ export class ResilientTranscribeProvider implements TranscriptionProvider {
           requestedMode: "AUTO",
         };
       } catch (azureError: unknown) {
+        // Re-throw Azure error as the terminal error
         this.logger?.error({
           event: "transcription.auto_exhausted",
           projectId,
           audioSourceId,
           attemptsUsed: 2,
-          geminiError:
-            geminiError instanceof Error ? geminiError.message : String(geminiError),
-          azureError:
-            azureError instanceof Error ? azureError.message : String(azureError),
+          elapsedMs: Date.now() - autoStartTime,
         });
         throw azureError;
       }

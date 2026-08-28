@@ -71,6 +71,16 @@ describe("Audio Validation & Format Sniffing (TASK-004B)", () => {
     expect(result.safeDisplayName).toBe("test.wav");
   });
 
+  it("rejects supported MIME + random bytes when file signature is unrecognized", () => {
+    const randomBytes = Buffer.from("NOT_AN_AUDIO_HEADER_JUST_RANDOM_TEXT_AND_BYTES");
+    expect(() => validateAudioUpload(randomBytes, "audio/wav", "fake.wav", 1000)).toThrow(
+      ValidationError
+    );
+    expect(() => validateAudioUpload(randomBytes, "audio/mpeg", "fake.mp3", 1000)).toThrow(
+      ValidationError
+    );
+  });
+
   it("rejects empty buffer or payload exceeding max size", () => {
     expect(() => validateAudioUpload(Buffer.alloc(0), "audio/wav", "empty.wav", 1000)).toThrow(
       ValidationError

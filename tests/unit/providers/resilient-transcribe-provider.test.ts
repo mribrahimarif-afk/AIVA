@@ -40,7 +40,7 @@ describe("ResilientTranscribeProvider Routing & Fallback Tests (TASK-004B)", () 
     ],
   };
 
-  it("AUTO mode: Gemini success does NOT call Azure", async () => {
+  it("1. AUTO mode: Gemini success does NOT call Azure", async () => {
     const geminiMock: any = {
       id: "gemini-transcribe",
       modelName: "gemini-3.5-transcribe",
@@ -65,20 +65,106 @@ describe("ResilientTranscribeProvider Routing & Fallback Tests (TASK-004B)", () 
     expect(result.provider).toBe("gemini-transcribe");
   });
 
-  it("AUTO mode: Gemini 429 triggers Azure fallback once", async () => {
+  const allowlistedCodes = [
+    "RATE_LIMITED",
+    "TIMEOUT",
+    "NETWORK_FAILURE",
+    "UPSTREAM_UNAVAILABLE",
+    "MODEL_UNAVAILABLE",
+    "MALFORMED_RESPONSE",
+    "MISSING_TIMESTAMPS",
+    "AUTH_FAILED",
+    "FORBIDDEN",
+  ];
+
+  for (const code of allowlistedCodes) {
+    it(`2. AUTO mode: Gemini ${code} triggers Azure fallback exactly once`, async () => {
+      const geminiMock: any = {
+        id: "gemini-transcribe",
+        modelName: "gemini-3.5-transcribe",
+        isConfigured: vi.fn().mockReturnValue(true),
+        transcribe: vi.fn().mockRejectedValue(
+          new ProviderError("gemini-transcribe", `Error with code ${code}`, { code })
+        ),
+      };
+      const azureMock: any = {
+        id: "azure-speech-stt",
+        modelName: "azure-speech-continuous-stt",
+        isConfigured: vi.fn().mockReturnValue(true),
+        transcribe: vi.fn().mockResolvedValue(azureSampleResult),
+      };
+
+      const router = new ResilientTranscribeProvider({
+        geminiProvider: geminiMock,
+        azureProvider: azureMock,
+      });
+
+      const result = await router.transcribe(dummyInput);
+      expect(geminiMock.transcribe).toHaveBeenCalledTimes(1);
+      expect(azureMock.transcribe).toHaveBeenCalledTimes(1);
+      expect(result.provider).toBe("azure-speech-stt");
+      expect(result.requestedMode).toBe("AUTO");
+    });
+  }
+
+  const nonAllowlistedCodes = [
+    "INVALID_INPUT",
+    "INVALID_AUDIO",
+    "UNSUPPORTED_FORMAT",
+    "AUDIO_TOO_LONG",
+    "UNPROBEABLE_AUDIO",
+    "NO_SPEECH",
+    "STORAGE_FAILURE",
+    "PERSISTENCE_FAILURE",
+    "DB_FAILURE",
+    "STALE_SOURCE",
+    "CANCELLED",
+  ];
+
+  for (const code of nonAllowlistedCodes) {
+    it(`3. AUTO mode: Gemini error ${code} does NOT trigger Azure fallback`, async () => {
+      const geminiMock: any = {
+        id: "gemini-transcribe",
+        modelName: "gemini-3.5-transcribe",
+        isConfigured: vi.fn().mockReturnValue(true),
+        transcribe: vi.fn().mockRejectedValue(
+          new ProviderError("gemini-transcribe", `Error with code ${code}`, { code })
+        ),
+      };
+      const azureMock: any = {
+        id: "azure-speech-stt",
+        modelName: "azure-speech-continuous-stt",
+        isConfigured: vi.fn().mockReturnValue(true),
+        transcribe: vi.fn(),
+      };
+
+      const router = new ResilientTranscribeProvider({
+        geminiProvider: geminiMock,
+        azureProvider: azureMock,
+      });
+
+      await expect(router.transcribe(dummyInput)).rejects.toMatchObject({
+        details: { code },
+      });
+      expect(geminiMock.transcribe).toHaveBeenCalledTimes(1);
+      expect(azureMock.transcribe).not.toHaveBeenCalled();
+    });
+  }
+
+  it("4. AUTO mode: generic ProviderError without allowlisted code does NOT fall back", async () => {
     const geminiMock: any = {
       id: "gemini-transcribe",
       modelName: "gemini-3.5-transcribe",
       isConfigured: vi.fn().mockReturnValue(true),
       transcribe: vi.fn().mockRejectedValue(
-        new ProviderError("gemini-transcribe", "Rate limited", { code: "RATE_LIMITED" })
+        new ProviderError("gemini-transcribe", "Generic unclassified provider error")
       ),
     };
     const azureMock: any = {
       id: "azure-speech-stt",
       modelName: "azure-speech-continuous-stt",
       isConfigured: vi.fn().mockReturnValue(true),
-      transcribe: vi.fn().mockResolvedValue(azureSampleResult),
+      transcribe: vi.fn(),
     };
 
     const router = new ResilientTranscribeProvider({
@@ -86,68 +172,12 @@ describe("ResilientTranscribeProvider Routing & Fallback Tests (TASK-004B)", () 
       azureProvider: azureMock,
     });
 
-    const result = await router.transcribe(dummyInput);
+    await expect(router.transcribe(dummyInput)).rejects.toThrow("Generic unclassified provider error");
     expect(geminiMock.transcribe).toHaveBeenCalledTimes(1);
-    expect(azureMock.transcribe).toHaveBeenCalledTimes(1);
-    expect(result.provider).toBe("azure-speech-stt");
-    expect(result.requestedMode).toBe("AUTO");
+    expect(azureMock.transcribe).not.toHaveBeenCalled();
   });
 
-  it("AUTO mode: Gemini timeout triggers Azure fallback once", async () => {
-    const geminiMock: any = {
-      id: "gemini-transcribe",
-      modelName: "gemini-3.5-transcribe",
-      isConfigured: vi.fn().mockReturnValue(true),
-      transcribe: vi.fn().mockRejectedValue(
-        new ProviderError("gemini-transcribe", "Timeout", { code: "TIMEOUT" })
-      ),
-    };
-    const azureMock: any = {
-      id: "azure-speech-stt",
-      modelName: "azure-speech-continuous-stt",
-      isConfigured: vi.fn().mockReturnValue(true),
-      transcribe: vi.fn().mockResolvedValue(azureSampleResult),
-    };
-
-    const router = new ResilientTranscribeProvider({
-      geminiProvider: geminiMock,
-      azureProvider: azureMock,
-    });
-
-    const result = await router.transcribe(dummyInput);
-    expect(geminiMock.transcribe).toHaveBeenCalledTimes(1);
-    expect(azureMock.transcribe).toHaveBeenCalledTimes(1);
-    expect(result.provider).toBe("azure-speech-stt");
-  });
-
-  it("AUTO mode: Gemini missing timestamps triggers Azure fallback once", async () => {
-    const geminiMock: any = {
-      id: "gemini-transcribe",
-      modelName: "gemini-3.5-transcribe",
-      isConfigured: vi.fn().mockReturnValue(true),
-      transcribe: vi.fn().mockRejectedValue(
-        new ProviderError("gemini-transcribe", "Missing timestamps", { code: "MISSING_TIMESTAMPS" })
-      ),
-    };
-    const azureMock: any = {
-      id: "azure-speech-stt",
-      modelName: "azure-speech-continuous-stt",
-      isConfigured: vi.fn().mockReturnValue(true),
-      transcribe: vi.fn().mockResolvedValue(azureSampleResult),
-    };
-
-    const router = new ResilientTranscribeProvider({
-      geminiProvider: geminiMock,
-      azureProvider: azureMock,
-    });
-
-    const result = await router.transcribe(dummyInput);
-    expect(geminiMock.transcribe).toHaveBeenCalledTimes(1);
-    expect(azureMock.transcribe).toHaveBeenCalledTimes(1);
-    expect(result.provider).toBe("azure-speech-stt");
-  });
-
-  it("AUTO mode: unconfigured Gemini routes directly to Azure without invoking Gemini", async () => {
+  it("5. AUTO mode: unconfigured Gemini routes directly to Azure without invoking Gemini", async () => {
     const geminiMock: any = {
       id: "gemini-transcribe",
       modelName: "gemini-3.5-transcribe",
@@ -172,7 +202,7 @@ describe("ResilientTranscribeProvider Routing & Fallback Tests (TASK-004B)", () 
     expect(result.provider).toBe("azure-speech-stt");
   });
 
-  it("GEMINI mode failure does NOT call Azure", async () => {
+  it("6. GEMINI mode failure does NOT call Azure", async () => {
     const geminiMock: any = {
       id: "gemini-transcribe",
       modelName: "gemini-3.5-transcribe",
@@ -200,7 +230,7 @@ describe("ResilientTranscribeProvider Routing & Fallback Tests (TASK-004B)", () 
     expect(azureMock.transcribe).not.toHaveBeenCalled();
   });
 
-  it("AZURE mode does NOT call Gemini", async () => {
+  it("7. AZURE mode does NOT call Gemini", async () => {
     const geminiMock: any = {
       id: "gemini-transcribe",
       modelName: "gemini-3.5-transcribe",
@@ -225,7 +255,7 @@ describe("ResilientTranscribeProvider Routing & Fallback Tests (TASK-004B)", () 
     expect(result.provider).toBe("azure-speech-stt");
   });
 
-  it("ELEVENLABS mode calls only ElevenLabs provider", async () => {
+  it("8. ELEVENLABS mode calls only ElevenLabs provider", async () => {
     const geminiMock: any = { id: "gemini-transcribe", isConfigured: vi.fn() };
     const azureMock: any = { id: "azure-speech-stt", isConfigured: vi.fn() };
     const elevenLabsMock: any = {

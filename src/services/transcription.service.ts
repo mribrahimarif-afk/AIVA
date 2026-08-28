@@ -7,6 +7,7 @@ import {
   type TranscriptionRecord,
   type TranscribeRequestInput,
   type UseWithDirectorInput,
+  type TranscriptionRuntimeSemantics,
 } from "@/domain/transcription";
 import type { DirectorPlan } from "@/domain/director";
 import type {
@@ -29,6 +30,7 @@ export interface TranscriptionServiceOptions {
   directorService: DirectorService;
   logger: Logger;
   maxAudioBytes?: number;
+  runtimeSemantics?: TranscriptionRuntimeSemantics;
 }
 
 export class TranscriptionService {
@@ -40,6 +42,7 @@ export class TranscriptionService {
   private readonly directorService: DirectorService;
   private readonly logger: Logger;
   private readonly maxAudioBytes: number;
+  private readonly runtimeSemantics: TranscriptionRuntimeSemantics;
 
   constructor(options: TranscriptionServiceOptions) {
     this.projectRepository = options.projectRepository;
@@ -50,10 +53,20 @@ export class TranscriptionService {
     this.directorService = options.directorService;
     this.logger = options.logger;
     this.maxAudioBytes = options.maxAudioBytes || 52428800; // 50 MB default
+    this.runtimeSemantics = options.runtimeSemantics || {
+      geminiModel: "gemini-3.5-transcribe",
+      azureModel: "azure-speech-continuous-stt",
+      elevenLabsModel: "scribe_v2",
+      routingPolicyVersion: "v1",
+      canonicalBuilderVersion: "v1",
+      languageHints: [],
+      vocabularyHash: null,
+    };
   }
 
   /**
    * Validates and content-addressed uploads an audio source for a project.
+   * Lifecycle: validation & probe occur before permanent publication to prevent orphaned blobs.
    */
   async uploadAudioSource(
     projectId: string,
@@ -74,24 +87,47 @@ export class TranscriptionService {
       this.maxAudioBytes
     );
 
-    // 2. Stage and publish content-addressed file
+    // 2. Preflight duration probe before permanent publication
+    // Write a temporary file for ffprobe if needed
+    const { getTempRoot } = await import("@/storage/paths");
+    const path = await import("node:path");
+    const fs = await import("node:fs");
+    const crypto = await import("node:crypto");
+
+    const tempRoot = getTempRoot();
+    await fs.promises.mkdir(tempRoot, { recursive: true });
+    const tempProbePath = path.join(tempRoot, `probe-${crypto.randomUUID()}${validated.extension}`);
+    await fs.promises.writeFile(tempProbePath, audioBuffer);
+
+    let durationMs: number | null = null;
+    try {
+      durationMs = await probeAudioDurationMs(audioBuffer, tempProbePath);
+    } finally {
+      try {
+        await fs.promises.unlink(tempProbePath);
+      } catch {
+        // Ignore unlink error
+      }
+    }
+
+    if (durationMs === null || durationMs <= 0) {
+      throw new ValidationError(
+        "Could not determine valid audio stream or duration from uploaded file"
+      );
+    }
+
+    if (durationMs > MAX_AUDIO_DURATION_MS) {
+      throw new ValidationError(
+        `Audio duration (${Math.round(durationMs / 1000)}s) exceeds the maximum allowed ceiling of 30 minutes (1800s)`
+      );
+    }
+
+    // 3. Stage and publish content-addressed file
     const publishResult = await this.audioSourceStorageService.stageAndPublishAudioSource(
       audioBuffer,
       projectId,
       validated.extension
     );
-
-    // 3. Preflight probe audio duration
-    const absolutePath = this.audioSourceStorageService.resolveAbsolutePath(
-      publishResult.storageRef
-    );
-    const durationMs = await probeAudioDurationMs(audioBuffer, absolutePath);
-
-    if (durationMs !== null && durationMs > MAX_AUDIO_DURATION_MS) {
-      throw new ValidationError(
-        `Audio duration (${Math.round(durationMs / 1000)}s) exceeds the maximum allowed ceiling of 30 minutes (1800s)`
-      );
-    }
 
     // 4. Persist AudioSource record in database
     const audioSource = await this.audioSourceRepository.create({
@@ -140,17 +176,24 @@ export class TranscriptionService {
       });
     }
 
-    // 2. Compute deterministic configuration reuse hash
+    // 2. Compute deterministic configuration reuse hash with full runtime semantics
     const requestedMode = mode as "AUTO" | "GEMINI" | "AZURE" | "ELEVENLABS";
     const configurationHash = computeTranscriptionConfigHash({
       sourceAudioHash: audioSource.sourceHash,
       requestedMode,
+      geminiModel: this.runtimeSemantics.geminiModel,
+      azureModel: this.runtimeSemantics.azureModel,
+      elevenLabsModel: this.runtimeSemantics.elevenLabsModel,
+      routingPolicyVersion: this.runtimeSemantics.routingPolicyVersion,
+      canonicalBuilderVersion: this.runtimeSemantics.canonicalBuilderVersion,
+      languageHints: this.runtimeSemantics.languageHints,
+      vocabularyHash: this.runtimeSemantics.vocabularyHash,
     });
 
-    // 3. Cost-safe reuse check: if not forcing, return existing accepted record
+    // 3. AudioSource-scoped cost-safe reuse check: if not forcing, return existing accepted record
     if (!force) {
-      const existing = await this.transcriptionRepository.findByConfigurationHash(
-        projectId,
+      const existing = await this.transcriptionRepository.findByAudioSourceAndConfigurationHash(
+        audioSourceId,
         configurationHash
       );
       if (existing) {
@@ -197,7 +240,12 @@ export class TranscriptionService {
     if (probedDurationMs === null) {
       probedDurationMs = await probeAudioDurationMs(audioBuffer, sourceFilePath);
     }
-    if (typeof probedDurationMs === "number" && probedDurationMs > MAX_AUDIO_DURATION_MS) {
+    if (probedDurationMs === null || probedDurationMs <= 0) {
+      throw new ValidationError(
+        "Audio duration could not be determined. Unprobeable audio is not eligible for transcription."
+      );
+    }
+    if (probedDurationMs > MAX_AUDIO_DURATION_MS) {
       throw new ValidationError(
         `Audio duration (${probedDurationMs}ms) exceeds the maximum allowed ceiling of 30 minutes`
       );
@@ -208,7 +256,7 @@ export class TranscriptionService {
       audioBuffer,
       mimeType: audioSource.mimeType,
       sourceFilePath,
-      durationMs: probedDurationMs !== null ? probedDurationMs : undefined,
+      durationMs: probedDurationMs,
       projectId,
       audioSourceId,
       requestedMode: mode,

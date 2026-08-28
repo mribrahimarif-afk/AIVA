@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import type { AudioSourceInfo } from "@/domain/transcription";
+import { ValidationError } from "@/domain/errors";
 
 export interface CreateAudioSourceInput {
   projectId: string;
@@ -121,6 +122,17 @@ export function createAudioSourceRepository(db: PrismaClient): AudioSourceReposi
       audioSourceId: string,
       transcriptionId: string
     ): Promise<AudioSourceInfo> {
+      // Validate that transcription exists and belongs to this AudioSource
+      const transcription = await db.transcription.findUnique({
+        where: { id: transcriptionId },
+      });
+
+      if (!transcription || transcription.audioSourceId !== audioSourceId) {
+        throw new ValidationError(
+          `Cannot set active transcription: Transcription ${transcriptionId} does not belong to AudioSource ${audioSourceId}`
+        );
+      }
+
       const record = await db.audioSource.update({
         where: { id: audioSourceId },
         data: { activeTranscriptionId: transcriptionId },

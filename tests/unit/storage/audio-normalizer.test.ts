@@ -1,26 +1,39 @@
 import { describe, it, expect } from "vitest";
-import { parseWavDurationMs } from "@/storage/audio-normalizer";
+import fs from "node:fs";
+import {
+  parseWavDurationMs,
+  isExactAzureWav,
+  normalizeAudioForAzure,
+} from "@/storage/audio-normalizer";
+import { StorageError } from "@/domain/errors";
+
+function createWavHeader(sampleRate: number, channels: number, bitsPerSample: number, dataBytes: number): Buffer {
+  const byteRate = (sampleRate * channels * bitsPerSample) / 8;
+  const blockAlign = (channels * bitsPerSample) / 8;
+  const buffer = Buffer.alloc(44 + dataBytes);
+
+  buffer.write("RIFF", 0);
+  buffer.writeUInt32LE(36 + dataBytes, 4);
+  buffer.write("WAVE", 8);
+
+  buffer.write("fmt ", 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20); // PCM
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(byteRate, 28);
+  buffer.writeUInt16LE(blockAlign, 32);
+  buffer.writeUInt16LE(bitsPerSample, 34);
+
+  buffer.write("data", 36);
+  buffer.writeUInt32LE(dataBytes, 40);
+
+  return buffer;
+}
 
 describe("Audio Normalizer & Duration Probe (TASK-004B)", () => {
   it("correctly parses WAV duration from header byteRate and data chunk size", () => {
-    // Construct a minimal 44-byte WAV header for 16kHz 16-bit mono PCM (byteRate = 32000 bytes/sec)
-    const wav = Buffer.alloc(44 + 32000); // 1 second of audio data
-    wav.write("RIFF", 0);
-    wav.writeUInt32LE(36 + 32000, 4);
-    wav.write("WAVE", 8);
-
-    wav.write("fmt ", 12);
-    wav.writeUInt32LE(16, 16); // fmt chunk size
-    wav.writeUInt16LE(1, 20); // PCM format
-    wav.writeUInt16LE(1, 22); // 1 channel
-    wav.writeUInt32LE(16000, 24); // 16000 sample rate
-    wav.writeUInt32LE(32000, 28); // 32000 byte rate
-    wav.writeUInt16LE(2, 32); // block align
-    wav.writeUInt16LE(16, 34); // bits per sample
-
-    wav.write("data", 36);
-    wav.writeUInt32LE(32000, 40); // 32000 data bytes = 1000ms
-
+    const wav = createWavHeader(16000, 1, 16, 32000); // 1000ms
     const durationMs = parseWavDurationMs(wav);
     expect(durationMs).toBe(1000);
   });
@@ -28,5 +41,28 @@ describe("Audio Normalizer & Duration Probe (TASK-004B)", () => {
   it("returns null for non-WAV buffer", () => {
     const randomBuffer = Buffer.from("NOT A WAV FILE DATA");
     expect(parseWavDurationMs(randomBuffer)).toBeNull();
+  });
+
+  it("isExactAzureWav correctly validates exact 16kHz 16-bit mono PCM WAV", () => {
+    const exactWav = createWavHeader(16000, 1, 16, 32000);
+    expect(isExactAzureWav(exactWav)).toBe(true);
+
+    const stereoWav = createWavHeader(16000, 2, 16, 64000);
+    expect(isExactAzureWav(stereoWav)).toBe(false);
+
+    const highSampleRateWav = createWavHeader(44100, 1, 16, 88200);
+    expect(isExactAzureWav(highSampleRateWav)).toBe(false);
+
+    const bit24Wav = createWavHeader(16000, 1, 24, 48000);
+    expect(isExactAzureWav(bit24Wav)).toBe(false);
+  });
+
+  it("normalizeAudioForAzure copies exact Azure WAV directly and cleans up temporary file", async () => {
+    const exactWav = createWavHeader(16000, 1, 16, 32000);
+    const result = await normalizeAudioForAzure("dummy.wav", exactWav);
+
+    expect(fs.existsSync(result.tempWavPath)).toBe(true);
+    await result.cleanup();
+    expect(fs.existsSync(result.tempWavPath)).toBe(false);
   });
 });
