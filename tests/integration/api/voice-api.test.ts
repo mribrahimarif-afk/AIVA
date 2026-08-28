@@ -45,6 +45,30 @@ describe("Voice API Integration Tests", () => {
     const body = await res.json();
     expect(body.track).toBeNull();
     expect(body.supportedVoices).toBeDefined();
+    expect(body.providers).toBeDefined();
+    expect(body.providers.azure).toBeDefined();
+    expect(body.providers.elevenlabs).toBeDefined();
+  });
+
+  it("POST /api/projects/[id]/voice/generate rejects unsupported provider with 400", async () => {
+    const project = await projectRepo.create({
+      name: "Bad Provider Project",
+      aspectRatio: "9:16",
+      script: "Script with bad provider",
+    });
+
+    const res = await generateHandler(
+      new Request(`http://localhost/api/projects/${project.id}/voice/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "AMAZON_POLLY", voiceName: "Joanna" }),
+      }),
+      { params: Promise.resolve({ id: project.id }) }
+    );
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe("VALIDATION_ERROR");
   });
 
   it("POST /api/projects/[id]/voice/generate returns 400 when no DirectorPlan exists", async () => {

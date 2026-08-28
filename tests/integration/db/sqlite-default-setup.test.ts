@@ -10,13 +10,19 @@ describe("SQLite Default Local Setup & Parent Directory Auto-Creation Smoke Test
   const schemaDir = path.resolve(process.cwd(), "prisma");
   const expectedDbFile = path.resolve(schemaDir, "test-default-smoke.db");
 
+  let originalDbUrl: string | undefined;
+
   beforeEach(() => {
+    originalDbUrl = process.env.DATABASE_URL;
     if (fs.existsSync(expectedDbFile)) {
       fs.rmSync(expectedDbFile, { force: true });
     }
   });
 
   afterEach(() => {
+    if (originalDbUrl !== undefined) {
+      process.env.DATABASE_URL = originalDbUrl;
+    }
     if (fs.existsSync(expectedDbFile)) {
       fs.rmSync(expectedDbFile, { force: true });
     }

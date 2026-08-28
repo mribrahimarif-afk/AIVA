@@ -20,6 +20,7 @@ import { createDirectorService } from "./director.service";
 
 import { createVoiceTrackRepository } from "@/repositories/voice-track.repository";
 import { AzureVoiceProvider } from "@/providers/voice/azure-voice.provider";
+import { ElevenLabsVoiceProvider } from "@/providers/voice/elevenlabs-voice.provider";
 import { voiceStorageService } from "@/storage/voice-storage.service";
 import { VoiceService } from "./voice.service";
 
@@ -59,11 +60,21 @@ export const directorAiProvider = new ResilientDirectorProvider({
   logger,
 });
 
-export const voiceProvider = new AzureVoiceProvider({
+export const azureVoiceProvider = new AzureVoiceProvider({
   apiKey: env.AZURE_SPEECH_KEY,
   region: env.AZURE_SPEECH_REGION,
   timeoutMs: env.VOICE_SYNTHESIS_TIMEOUT_MS,
 });
+
+export const elevenLabsVoiceProvider = new ElevenLabsVoiceProvider({
+  apiKey: env.ELEVENLABS_API_KEY,
+  modelId: env.ELEVENLABS_MODEL_ID,
+  defaultVoiceId: env.ELEVENLABS_DEFAULT_VOICE_ID,
+  timeoutMs: env.ELEVENLABS_TIMEOUT_MS,
+});
+
+// Backward-compatible alias for existing imports
+export const voiceProvider = azureVoiceProvider;
 
 export const services = {
   project: createProjectService({ projectRepository: repositories.project, db: prisma }),
@@ -89,7 +100,12 @@ export const services = {
     projectRepository: repositories.project,
     directorPlanRepository: repositories.directorPlan,
     voiceTrackRepository: repositories.voiceTrack,
-    voiceProvider,
+    voiceProvider: azureVoiceProvider,
+    voiceProviders: {
+      "azure-speech": azureVoiceProvider,
+      azure: azureVoiceProvider,
+      elevenlabs: elevenLabsVoiceProvider,
+    },
     voiceStorageService,
   }),
 };

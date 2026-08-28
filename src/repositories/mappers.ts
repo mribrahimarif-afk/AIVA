@@ -261,6 +261,7 @@ export function toVoiceTrackDto(
     directorPlanId: aggregate.directorPlanId,
     sourceScriptHash: aggregate.sourceScriptHash,
     provider: aggregate.provider,
+    model: aggregate.model,
     voiceName: aggregate.voiceName,
     locale: aggregate.locale,
     outputFormat: aggregate.outputFormat,

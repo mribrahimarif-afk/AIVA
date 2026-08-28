@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { services, voiceProvider } from "@/services/container";
+import { services, azureVoiceProvider, elevenLabsVoiceProvider, voiceProvider } from "@/services/container";
 import { NotFoundError } from "@/domain/errors";
 import { Card } from "@/components/ui/card";
 import { ProjectStatusBadge } from "@/components/projects/status-badge";
@@ -26,14 +26,16 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
     notFound();
   }
 
-  const [plan, brands, voiceTrack] = await Promise.all([
+  const [plan, brands, voiceTrack, elevenLabsVoices] = await Promise.all([
     services.director.getPlan(id),
     services.brand.listBrands(),
     services.voice.getVoiceTrack(id).catch(() => null),
+    elevenLabsVoiceProvider.listVoices().catch(() => []),
   ]);
 
   const isAiConfigured = services.director.isAiConfigured();
-  const isVoiceConfigured = voiceProvider.isConfigured();
+  const isAzureConfigured = azureVoiceProvider.isConfigured();
+  const isElevenLabsConfigured = elevenLabsVoiceProvider.isConfigured();
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -66,9 +68,15 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         hasDirectorPlan={Boolean(plan)}
         directorScriptHash={plan?.scriptHash}
         initialVoiceTrack={voiceTrack}
-        isConfigured={isVoiceConfigured}
+        isConfigured={isAzureConfigured}
+        azureConfigured={isAzureConfigured}
+        elevenLabsConfigured={isElevenLabsConfigured}
         defaultVoice={voiceProvider.defaultVoice}
+        defaultAzureVoice={azureVoiceProvider.defaultVoice}
+        defaultElevenLabsVoice={elevenLabsVoiceProvider.defaultVoice}
         supportedVoices={Object.values(VOICE_PROFILES)}
+        azureVoices={Object.values(VOICE_PROFILES)}
+        elevenLabsVoices={elevenLabsVoices}
       />
     </div>
   );

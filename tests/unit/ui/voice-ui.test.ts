@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { VoiceWorkspace } from "@/components/voice/voice-workspace";
-import { VoiceTrackDto } from "@/domain/voice";
+import { VoiceTrackDto, VoiceProfile } from "@/domain/voice";
 
 describe("VoiceWorkspace UI Component Tests", () => {
   const mockTrack: VoiceTrackDto = {
@@ -11,6 +11,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
     directorPlanId: "dp_123",
     sourceScriptHash: "hash_abc_123",
     provider: "azure-speech",
+    model: "azure-neural",
     voiceName: "ur-PK-AsadNeural",
     locale: "ur-PK",
     outputFormat: "Riff24Khz16BitMonoPcm",
@@ -24,6 +25,37 @@ describe("VoiceWorkspace UI Component Tests", () => {
     audioUrl: "/api/projects/proj_123/voice/audio",
   };
 
+  const mockElevenLabsTrack: VoiceTrackDto = {
+    ...mockTrack,
+    id: "vt_el_123",
+    provider: "elevenlabs",
+    model: "eleven_v3",
+    voiceName: "custom_voice_abc",
+  };
+
+  const mockElevenLabsVoices: VoiceProfile[] = [
+    {
+      name: "custom_voice_1",
+      displayName: "Custom Voice One",
+      language: "Multilingual",
+      locale: "multilingual",
+      gender: "Female",
+      description: "Custom test voice",
+      provider: "ELEVENLABS",
+      voiceId: "custom_voice_1",
+    },
+    {
+      name: "custom_voice_2",
+      displayName: "Custom Voice Two",
+      language: "Multilingual",
+      locale: "multilingual",
+      gender: "Male",
+      description: "Another custom test voice",
+      provider: "ELEVENLABS",
+      voiceId: "custom_voice_2",
+    },
+  ];
+
   it("renders 'Director Plan Required' notice when hasDirectorPlan is false", () => {
     const html = renderToString(
       React.createElement(VoiceWorkspace, {
@@ -34,7 +66,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
 
     expect(html).toContain("Director Plan Required");
     expect(html).toContain("Please analyze your script with AIVA Director above");
-    expect(html).not.toContain("Select Neural Voice");
+    expect(html).not.toContain("Select Azure Voice");
   });
 
   it("renders 'Azure Speech Provider Not Configured' when isConfigured is false", () => {
@@ -43,13 +75,13 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: false,
+        azureConfigured: false,
       })
     );
 
     expect(html).toContain("Azure Speech Provider Not Configured");
     expect(html).toContain("AZURE_SPEECH_KEY");
     expect(html).toContain("AZURE_SPEECH_REGION");
-    expect(html).not.toContain("Select Neural Voice");
   });
 
   it("renders voice selector and 'Generate Voice' button when ready and no existing track", () => {
@@ -58,17 +90,33 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: true,
+        azureConfigured: true,
         directorScriptHash: "hash_abc_123",
         initialVoiceTrack: null,
       })
     );
 
-    expect(html).toContain("Select Neural Voice");
+    expect(html).toContain("Select Azure Voice");
     expect(html).toContain("Asad");
     expect(html).toContain("Uzma");
     expect(html).toContain("Urdu (Pakistan)");
     expect(html).toContain("Generate Voice");
     expect(html).not.toContain("⚠️ Narration Outdated");
+  });
+
+  it("renders provider options for Azure Speech and ElevenLabs", () => {
+    const html = renderToString(
+      React.createElement(VoiceWorkspace, {
+        projectId: "proj_123",
+        hasDirectorPlan: true,
+        isConfigured: true,
+        azureConfigured: true,
+        elevenLabsConfigured: true,
+      })
+    );
+
+    expect(html).toContain("Azure Speech");
+    expect(html).toContain("ElevenLabs");
   });
 
   it("renders audio player, duration, words timed, and 'Regenerate Voice' button when track exists", () => {
@@ -77,6 +125,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: true,
+        azureConfigured: true,
         directorScriptHash: "hash_abc_123",
         initialVoiceTrack: mockTrack,
       })
@@ -97,6 +146,7 @@ describe("VoiceWorkspace UI Component Tests", () => {
         projectId: "proj_123",
         hasDirectorPlan: true,
         isConfigured: true,
+        azureConfigured: true,
         directorScriptHash: "hash_different_updated_script",
         initialVoiceTrack: mockTrack,
       })
@@ -105,5 +155,132 @@ describe("VoiceWorkspace UI Component Tests", () => {
     expect(html).toContain("⚠️ Narration Outdated");
     expect(html).toContain("Script Updated");
     expect(html).toContain("Regenerate Now");
+  });
+
+  it("renders empty catalogue warning and disables all generation triggers when ElevenLabs discovery returns empty", () => {
+    const html = renderToString(
+      React.createElement(VoiceWorkspace, {
+        projectId: "proj_123",
+        hasDirectorPlan: true,
+        isConfigured: true,
+        azureConfigured: true,
+        elevenLabsConfigured: true,
+        initialVoiceTrack: mockElevenLabsTrack,
+        elevenLabsVoices: [],
+      })
+    );
+
+    expect(html).toContain("Unable to load ElevenLabs voices");
+    expect(html).not.toContain("Select ElevenLabs Voice");
+    expect(html).not.toContain("Regenerate Voice");
+    expect(html).not.toContain("Generate Voice");
+  });
+
+  it("hides 'Regenerate Now' button in stale banner when ElevenLabs has empty catalogue", () => {
+    const html = renderToString(
+      React.createElement(VoiceWorkspace, {
+        projectId: "proj_123",
+        hasDirectorPlan: true,
+        isConfigured: true,
+        azureConfigured: true,
+        elevenLabsConfigured: true,
+        directorScriptHash: "hash_different_updated_script",
+        initialVoiceTrack: mockElevenLabsTrack,
+        elevenLabsVoices: [],
+      })
+    );
+
+    expect(html).toContain("Script Updated");
+    expect(html).not.toContain("Regenerate Now");
+    expect(html).toContain("Unable to load ElevenLabs voices");
+  });
+
+  it("selects configured default voice when present in discovered catalogue", () => {
+    const html = renderToString(
+      React.createElement(VoiceWorkspace, {
+        projectId: "proj_123",
+        hasDirectorPlan: true,
+        isConfigured: true,
+        azureConfigured: true,
+        elevenLabsConfigured: true,
+        defaultElevenLabsVoice: "custom_voice_2",
+        initialVoiceTrack: mockElevenLabsTrack,
+        elevenLabsVoices: mockElevenLabsVoices,
+      })
+    );
+
+    expect(html).toContain("Select ElevenLabs Voice");
+    expect(html).toContain('value="custom_voice_2"');
+    expect(html).toContain("Custom Voice Two");
+  });
+
+  it("selects first discovered voice when configured default is not in catalogue", () => {
+    const html = renderToString(
+      React.createElement(VoiceWorkspace, {
+        projectId: "proj_123",
+        hasDirectorPlan: true,
+        isConfigured: true,
+        azureConfigured: true,
+        elevenLabsConfigured: true,
+        defaultElevenLabsVoice: "non_existent_configured_voice",
+        initialVoiceTrack: mockElevenLabsTrack,
+        elevenLabsVoices: mockElevenLabsVoices,
+      })
+    );
+
+    expect(html).toContain("Select ElevenLabs Voice");
+    expect(html).toContain('value="custom_voice_1"');
+    expect(html).toContain("Custom Voice One");
+  });
+
+  describe("selectedVoiceIsAvailable Catalogue Membership Tests", () => {
+    it("proves ElevenLabs selectedVoice absent from current catalogue disables generation and does not select unavailable voice", () => {
+      const inaccessibleTrack: VoiceTrackDto = {
+        ...mockElevenLabsTrack,
+        voiceName: "inaccessible_old_voice_id",
+      };
+
+      const html = renderToString(
+        React.createElement(VoiceWorkspace, {
+          projectId: "proj_123",
+          hasDirectorPlan: true,
+          isConfigured: true,
+          azureConfigured: true,
+          elevenLabsConfigured: true,
+          initialVoiceTrack: inaccessibleTrack,
+          elevenLabsVoices: mockElevenLabsVoices, // Contains custom_voice_1, custom_voice_2 (NOT inaccessible_old_voice_id)
+        })
+      );
+
+      // Must fall back to first valid discovered voice (custom_voice_1) and NOT keep inaccessible_old_voice_id
+      expect(html).not.toContain('value="inaccessible_old_voice_id"');
+      expect(html).toContain('value="custom_voice_1"');
+      expect(html).toContain("Regenerate Voice");
+    });
+
+    it("proves stale-track 'Regenerate Now' cannot submit inaccessible voice when catalogue is empty", () => {
+      const staleInaccessibleTrack: VoiceTrackDto = {
+        ...mockElevenLabsTrack,
+        voiceName: "inaccessible_voice_xyz",
+      };
+
+      const html = renderToString(
+        React.createElement(VoiceWorkspace, {
+          projectId: "proj_123",
+          hasDirectorPlan: true,
+          isConfigured: true,
+          azureConfigured: true,
+          elevenLabsConfigured: true,
+          directorScriptHash: "hash_updated_new_script",
+          initialVoiceTrack: staleInaccessibleTrack,
+          elevenLabsVoices: [], // Empty catalogue
+        })
+      );
+
+      expect(html).toContain("Script Updated");
+      expect(html).not.toContain("Regenerate Now");
+      expect(html).not.toContain("Regenerate Voice");
+      expect(html).toContain("Unable to load ElevenLabs voices");
+    });
   });
 });
