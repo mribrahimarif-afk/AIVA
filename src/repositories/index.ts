@@ -7,5 +7,6 @@ export * from "./director-plan.repository";
 export * from "./voice-track.repository";
 export * from "./audio-source.repository";
 export * from "./transcription.repository";
+export * from "./timeline.repository";
 export * from "./asset.repository";
 export * from "./mappers";

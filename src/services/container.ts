@@ -31,6 +31,8 @@ import { ElevenLabsTranscribeProvider } from "@/providers/transcription/elevenla
 import { ResilientTranscribeProvider } from "@/providers/transcription/resilient-transcribe.provider";
 import { VoiceService } from "./voice.service";
 import { TranscriptionService } from "./transcription.service";
+import { createTimelineRepository } from "@/repositories/timeline.repository";
+import { TimelineService } from "./timeline.service";
 
 /**
  * Composition root wiring Prisma-backed repositories to application services.
@@ -45,6 +47,7 @@ export const repositories = {
   voiceTrack: createVoiceTrackRepository(prisma),
   audioSource: createAudioSourceRepository(prisma),
   transcription: createTranscriptionRepository(prisma),
+  timeline: createTimelineRepository(prisma),
   asset: createAssetRepository(prisma),
 };
 
@@ -175,5 +178,12 @@ export const services = {
     voiceStorageService,
   }),
   transcription: transcriptionServiceInstance,
+  timeline: new TimelineService({
+    projectRepository: repositories.project,
+    directorPlanRepository: repositories.directorPlan,
+    voiceTrackRepository: repositories.voiceTrack,
+    audioSourceRepository: repositories.audioSource,
+    transcriptionRepository: repositories.transcription,
+    timelineRepository: repositories.timeline,
+  }),
 };
-
