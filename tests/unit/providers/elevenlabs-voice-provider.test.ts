@@ -487,6 +487,7 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
 
       expect(capturedUrl).toContain("https://api.elevenlabs.io/v2/voices");
       expect(capturedUrl).toContain("page_size=100");
+      expect(capturedUrl).toContain("include_total_count=false");
       expect(capturedHeaders["xi-api-key"]).toBe("el_key_discovery_123");
 
       expect(voices).toHaveLength(2);
@@ -544,8 +545,8 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       const voices = await provider.listVoices();
 
       expect(calls).toHaveLength(2);
-      expect(calls[0]).toBe("https://api.elevenlabs.io/v2/voices?page_size=100");
-      expect(calls[1]).toBe("https://api.elevenlabs.io/v2/voices?page_size=100&next_page_token=tok_page_2");
+      expect(calls[0]).toBe("https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=false");
+      expect(calls[1]).toBe("https://api.elevenlabs.io/v2/voices?page_size=100&include_total_count=false&next_page_token=tok_page_2");
 
       expect(voices).toHaveLength(2);
       expect(voices.map((v) => v.name)).toEqual(["v_page1_1", "v_page2_1"]);
