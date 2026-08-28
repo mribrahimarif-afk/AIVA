@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 type CreationMode = "SCRIPT" | "VOICE";
-type Stage = "IDLE" | "CREATING" | "UPLOADING" | "TRANSCRIBING" | "DIRECTING" | "SYNTHESIZING" | "DONE";
+type Stage = "IDLE" | "CREATING" | "UPLOADING" | "TRANSCRIBING" | "DIRECTING" | "SYNTHESIZING" | "TIMELINE" | "DONE";
 
 interface ProjectCreationWizardProps {
   brands: Brand[];
@@ -37,6 +37,7 @@ const stageLabels: Partial<Record<Stage, string>> = {
   TRANSCRIBING: "Transcribing voice",
   DIRECTING: "Building scene plan",
   SYNTHESIZING: "Generating narration",
+  TIMELINE: "Building timeline",
   DONE: "Pipeline complete",
 };
 
@@ -62,13 +63,13 @@ export function ProjectCreationWizard(props: ProjectCreationWizardProps) {
   const providerConfigured = voiceProvider === "AZURE" ? props.azureConfigured : props.elevenLabsConfigured;
   const busy = stage !== "IDLE" && stage !== "DONE";
   const canSubmit = mode === "SCRIPT"
-    ? Boolean(name.trim() && script.trim() && providerConfigured && voiceName && !busy)
+    ? Boolean(name.trim() && script.trim() && providerConfigured && voiceName && props.transcriptionAvailability[transcriptionMode] && !busy)
     : Boolean(name.trim() && audio && props.transcriptionAvailability[transcriptionMode] && !busy);
 
   const pipelineStages = useMemo<Stage[]>(
     () => mode === "SCRIPT"
-      ? ["CREATING", "DIRECTING", "SYNTHESIZING", "DONE"]
-      : ["CREATING", "UPLOADING", "TRANSCRIBING", "DIRECTING", "DONE"],
+      ? ["CREATING", "DIRECTING", "SYNTHESIZING", "TRANSCRIBING", "TIMELINE", "DONE"]
+      : ["CREATING", "UPLOADING", "TRANSCRIBING", "DIRECTING", "TIMELINE", "DONE"],
     [mode]
   );
 
@@ -115,7 +116,20 @@ export function ProjectCreationWizard(props: ProjectCreationWizardProps) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ provider: voiceProvider, voiceName }),
         }));
-        markComplete("SYNTHESIZING", "DONE");
+        markComplete("SYNTHESIZING", "TRANSCRIBING");
+        const narrationResponse = await fetch(`/api/projects/${projectId}/voice/audio`);
+        if (!narrationResponse.ok) await readResponse(narrationResponse);
+        const narration = await narrationResponse.blob();
+        const narrationUpload = new FormData();
+        narrationUpload.append("file", new File([narration], "generated-narration.wav", { type: narration.type || "audio/wav" }));
+        const uploaded = await readResponse(await fetch(`/api/projects/${projectId}/audio-source`, { method: "POST", body: narrationUpload }));
+        const generatedAudioSourceId = (uploaded.audioSource as { id: string }).id;
+        await readResponse(await fetch(`/api/projects/${projectId}/transcription`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ audioSourceId: generatedAudioSourceId, mode: transcriptionMode }),
+        }));
+        markComplete("TRANSCRIBING", "TIMELINE");
+        await readResponse(await fetch(`/api/projects/${projectId}/timeline`, { method: "POST" }));
+        markComplete("TIMELINE", "DONE");
       } else {
         markComplete("CREATING", "UPLOADING");
         const uploadBody = new FormData();
@@ -140,7 +154,9 @@ export function ProjectCreationWizard(props: ProjectCreationWizardProps) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ brandId: brandId || undefined, productId: productId || undefined }),
         }));
-        markComplete("DIRECTING", "DONE");
+        markComplete("DIRECTING", "TIMELINE");
+        await readResponse(await fetch(`/api/projects/${projectId}/timeline`, { method: "POST" }));
+        markComplete("TIMELINE", "DONE");
       }
 
       router.push(`/projects/${projectId}`);
@@ -185,6 +201,7 @@ export function ProjectCreationWizard(props: ProjectCreationWizardProps) {
             <label className="text-sm text-neutral-300">Voice Provider<select className="mt-1.5 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm" value={voiceProvider} onChange={(e) => changeProvider(e.target.value as VoiceProviderId)}><option value="AZURE">Azure Speech</option><option value="ELEVENLABS">ElevenLabs</option></select></label>
             <label className="text-sm text-neutral-300">Voice<select className="mt-1.5 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm" value={voiceName} disabled={!providerConfigured || voices.length === 0} onChange={(e) => setVoiceName(e.target.value)}><option value="">Select a discovered voice</option>{voices.map((voice) => <option key={voice.voiceId || voice.name} value={voice.name}>{voice.displayName} — {voice.language}</option>)}</select></label>
             {!providerConfigured || voices.length === 0 ? <p className="sm:col-span-2 text-xs text-amber-300">{voiceProvider === "ELEVENLABS" ? "ElevenLabs is unavailable or its voice catalogue could not be loaded." : "Azure Speech is not configured."}</p> : null}
+            <label className="text-sm text-neutral-300 sm:col-span-2">Narration Transcription Provider<select className="mt-1.5 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm" value={transcriptionMode} onChange={(e) => setTranscriptionMode(e.target.value as TranscriptionMode)}>{(["AUTO", "GEMINI", "AZURE", "ELEVENLABS"] as TranscriptionMode[]).map((item) => <option key={item} value={item} disabled={!props.transcriptionAvailability[item]}>{item}{!props.transcriptionAvailability[item] ? " (unavailable)" : ""}</option>)}</select></label>
           </div>
         ) : (
           <label className="block text-sm text-neutral-300">Transcription Provider<select className="mt-1.5 w-full rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm" value={transcriptionMode} onChange={(e) => setTranscriptionMode(e.target.value as TranscriptionMode)}>{(["AUTO", "GEMINI", "AZURE", "ELEVENLABS"] as TranscriptionMode[]).map((item) => <option key={item} value={item} disabled={!props.transcriptionAvailability[item]}>{item}{!props.transcriptionAvailability[item] ? " (unavailable)" : ""}</option>)}</select></label>
