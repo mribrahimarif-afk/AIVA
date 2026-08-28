@@ -125,27 +125,22 @@ describe("Isolated Database Migration Upgrade Verification (TASK-003 -> TASK-004
       },
     });
 
-    const directorPlan = await prisma.directorPlan.create({
-      data: {
-        id: "plan-1",
-        projectId: project.id,
-        originalScript: project.script,
-        scriptHash: "sample-script-hash-123",
-        unitizerVersion: "unitizer-v1",
-        schemaVersion: "director-v1",
-        promptVersion: "director-v1",
-        model: "gemini-3.7-flash",
-        language: "ENGLISH",
-        contentType: "COMMERCIAL",
-        summary: "Summary text",
-        creativeDirection: "Direction text",
-      },
-    });
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO "director_plans" (
+        "id", "projectId", "originalScript", "scriptHash", "unitizerVersion",
+        "schemaVersion", "promptVersion", "model", "language", "contentType",
+        "summary", "creativeDirection", "generatedAt"
+      ) VALUES (
+        'plan-1', 'proj-pre-task004', 'Discover the new era of autonomous video creation.',
+        'sample-script-hash-123', 'unitizer-v1', 'director-v1', 'director-v1',
+        'gemini-3.7-flash', 'ENGLISH', 'COMMERCIAL', 'Summary text', 'Direction text', CURRENT_TIMESTAMP
+      )
+    `);
 
     await prisma.directorScene.create({
       data: {
         id: "dscene-1",
-        directorPlanId: directorPlan.id,
+        directorPlanId: "plan-1",
         order: 1,
         text: "Discover the new era",
         unitIds: "[\"u0001\"]",
@@ -187,6 +182,19 @@ describe("Isolated Database Migration Upgrade Verification (TASK-003 -> TASK-004
     );
 
     for (const stmt of modelMigrationSql.split(";").map((s) => s.trim()).filter(Boolean)) {
+      await prisma.$executeRawUnsafe(stmt);
+    }
+
+    // 5. Apply TASK-004B audio_first migration SQL
+    const audioFirstSql = fs.readFileSync(
+      path.resolve(
+        process.cwd(),
+        "prisma/migrations/20260828120000_audio_first_transcription/migration.sql"
+      ),
+      "utf8"
+    );
+
+    for (const stmt of audioFirstSql.split(";").map((s) => s.trim()).filter(Boolean)) {
       await prisma.$executeRawUnsafe(stmt);
     }
   });

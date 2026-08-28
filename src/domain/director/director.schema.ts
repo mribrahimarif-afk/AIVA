@@ -50,6 +50,9 @@ export const analyzeScriptInputSchema = z.object({
     }),
   brandId: z.string().trim().min(1).optional(),
   productId: z.string().trim().min(1).optional(),
+  sourceType: z.enum(["SCRIPT", "AUDIO_TRANSCRIPT"]).optional(),
+  sourceTranscriptionId: z.string().trim().optional(),
+  sourceAudioHash: z.string().trim().optional(),
 });
 
 export type AnalyzeScriptInput = z.infer<typeof analyzeScriptInputSchema>;

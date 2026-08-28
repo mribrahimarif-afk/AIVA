@@ -4,5 +4,6 @@ export * as ProductDomain from "./product";
 export * as SceneDomain from "./scene";
 export * as DirectorDomain from "./director";
 export * as VoiceDomain from "./voice";
+export * as TranscriptionDomain from "./transcription";
 export * as AssetDomain from "./asset";
 export * from "./errors";

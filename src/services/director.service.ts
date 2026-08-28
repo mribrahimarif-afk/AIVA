@@ -228,6 +228,9 @@ export function createDirectorService(options: DirectorServiceOptions): Director
           creativeDirection: finalRawOutput.creativeDirection,
           brandId: input.brandId ?? null,
           productId: input.productId ?? null,
+          sourceType: input.sourceType || "SCRIPT",
+          sourceTranscriptionId: input.sourceTranscriptionId ?? null,
+          sourceAudioHash: input.sourceAudioHash ?? null,
         },
         validatedScenes.map((s) => ({
           order: s.order,

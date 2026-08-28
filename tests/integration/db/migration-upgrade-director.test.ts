@@ -140,6 +140,22 @@ describe("Isolated Database Migration Upgrade Verification (TASK-002 -> TASK-003
     for (const stmt of directorSql.split(";").map((s) => s.trim()).filter(Boolean)) {
       await prisma.$executeRawUnsafe(stmt);
     }
+
+    // 4. Apply subsequent migrations to match generated client schema
+    const subsequentMigrations = [
+      "20260827140000_voice_track_boundaries",
+      "20260828050000_voice_track_model",
+      "20260828120000_audio_first_transcription",
+    ];
+    for (const dir of subsequentMigrations) {
+      const sql = fs.readFileSync(
+        path.resolve(process.cwd(), `prisma/migrations/${dir}/migration.sql`),
+        "utf8"
+      );
+      for (const stmt of sql.split(";").map((s) => s.trim()).filter(Boolean)) {
+        await prisma.$executeRawUnsafe(stmt);
+      }
+    }
   });
 
   afterAll(async () => {

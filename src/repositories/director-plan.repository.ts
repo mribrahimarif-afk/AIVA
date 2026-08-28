@@ -24,6 +24,9 @@ export interface CreateDirectorPlanRecord {
   creativeDirection: string;
   brandId?: string | null;
   productId?: string | null;
+  sourceType?: string;
+  sourceTranscriptionId?: string | null;
+  sourceAudioHash?: string | null;
 }
 
 export interface CreateDirectorSceneRecord {
@@ -96,6 +99,9 @@ export function createDirectorPlanRepository(db: PrismaClient): DirectorPlanRepo
             creativeDirection: plan.creativeDirection,
             brandId: plan.brandId ?? null,
             productId: plan.productId ?? null,
+            sourceType: plan.sourceType || "SCRIPT",
+            sourceTranscriptionId: plan.sourceTranscriptionId ?? null,
+            sourceAudioHash: plan.sourceAudioHash ?? null,
             generatedAt: new Date(),
           },
           update: {
@@ -111,6 +117,9 @@ export function createDirectorPlanRepository(db: PrismaClient): DirectorPlanRepo
             creativeDirection: plan.creativeDirection,
             brandId: plan.brandId ?? null,
             productId: plan.productId ?? null,
+            sourceType: plan.sourceType || "SCRIPT",
+            sourceTranscriptionId: plan.sourceTranscriptionId ?? null,
+            sourceAudioHash: plan.sourceAudioHash ?? null,
             generatedAt: new Date(),
           },
         });

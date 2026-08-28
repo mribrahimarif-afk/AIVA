@@ -19,10 +19,18 @@ import { createHealthService } from "./health.service";
 import { createDirectorService } from "./director.service";
 
 import { createVoiceTrackRepository } from "@/repositories/voice-track.repository";
+import { createAudioSourceRepository } from "@/repositories/audio-source.repository";
+import { createTranscriptionRepository } from "@/repositories/transcription.repository";
 import { AzureVoiceProvider } from "@/providers/voice/azure-voice.provider";
 import { ElevenLabsVoiceProvider } from "@/providers/voice/elevenlabs-voice.provider";
 import { voiceStorageService } from "@/storage/voice-storage.service";
+import { audioSourceStorageService } from "@/storage/audio-source-storage.service";
+import { GeminiTranscribeProvider } from "@/providers/transcription/gemini-transcribe.provider";
+import { AzureTranscribeProvider } from "@/providers/transcription/azure-transcribe.provider";
+import { ElevenLabsTranscribeProvider } from "@/providers/transcription/elevenlabs-transcribe.provider";
+import { ResilientTranscribeProvider } from "@/providers/transcription/resilient-transcribe.provider";
 import { VoiceService } from "./voice.service";
+import { TranscriptionService } from "./transcription.service";
 
 /**
  * Composition root wiring Prisma-backed repositories to application services.
@@ -35,6 +43,8 @@ export const repositories = {
   scene: createSceneRepository(prisma),
   directorPlan: createDirectorPlanRepository(prisma),
   voiceTrack: createVoiceTrackRepository(prisma),
+  audioSource: createAudioSourceRepository(prisma),
+  transcription: createTranscriptionRepository(prisma),
   asset: createAssetRepository(prisma),
 };
 
@@ -73,8 +83,59 @@ export const elevenLabsVoiceProvider = new ElevenLabsVoiceProvider({
   timeoutMs: env.ELEVENLABS_TIMEOUT_MS,
 });
 
+// Transcription Providers (TASK-004B Audio-First)
+export const geminiTranscribeProvider = new GeminiTranscribeProvider({
+  apiKey: env.GEMINI_API_KEY,
+  model: env.GEMINI_TRANSCRIBE_MODEL,
+  timeoutMs: env.GEMINI_TRANSCRIBE_TIMEOUT_MS,
+  logger,
+});
+
+export const azureTranscribeProvider = new AzureTranscribeProvider({
+  apiKey: env.AZURE_SPEECH_KEY,
+  region: env.AZURE_SPEECH_REGION,
+  timeoutMs: env.AZURE_TRANSCRIBE_TIMEOUT_MS,
+  logger,
+});
+
+export const elevenLabsTranscribeProvider = new ElevenLabsTranscribeProvider({
+  apiKey: env.ELEVENLABS_STT_API_KEY || env.ELEVENLABS_API_KEY,
+  enabled: env.ELEVENLABS_STT_ENABLED,
+  modelId: env.ELEVENLABS_STT_MODEL_ID,
+  timeoutMs: env.ELEVENLABS_STT_TIMEOUT_MS,
+  logger,
+});
+
+export const resilientTranscribeProvider = new ResilientTranscribeProvider({
+  geminiProvider: geminiTranscribeProvider,
+  azureProvider: azureTranscribeProvider,
+  elevenLabsProvider: elevenLabsTranscribeProvider,
+  logger,
+});
+
 // Backward-compatible alias for existing imports
 export const voiceProvider = azureVoiceProvider;
+
+const directorServiceInstance = createDirectorService({
+  directorPlanRepository: repositories.directorPlan,
+  projectRepository: repositories.project,
+  brandRepository: repositories.brand,
+  productRepository: repositories.product,
+  directorAiProvider,
+  logger,
+  maxScriptChars: env.DIRECTOR_MAX_SCRIPT_CHARS,
+});
+
+const transcriptionServiceInstance = new TranscriptionService({
+  projectRepository: repositories.project,
+  audioSourceRepository: repositories.audioSource,
+  transcriptionRepository: repositories.transcription,
+  audioSourceStorageService,
+  transcriptionProvider: resilientTranscribeProvider,
+  directorService: directorServiceInstance,
+  logger,
+  maxAudioBytes: env.TRANSCRIBE_MAX_AUDIO_BYTES,
+});
 
 export const services = {
   project: createProjectService({ projectRepository: repositories.project, db: prisma }),
@@ -87,15 +148,7 @@ export const services = {
     repositories.product
   ),
   health: createHealthService(prisma),
-  director: createDirectorService({
-    directorPlanRepository: repositories.directorPlan,
-    projectRepository: repositories.project,
-    brandRepository: repositories.brand,
-    productRepository: repositories.product,
-    directorAiProvider,
-    logger,
-    maxScriptChars: env.DIRECTOR_MAX_SCRIPT_CHARS,
-  }),
+  director: directorServiceInstance,
   voice: new VoiceService({
     projectRepository: repositories.project,
     directorPlanRepository: repositories.directorPlan,
@@ -108,5 +161,6 @@ export const services = {
     },
     voiceStorageService,
   }),
+  transcription: transcriptionServiceInstance,
 };
 

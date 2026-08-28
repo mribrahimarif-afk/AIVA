@@ -27,6 +27,8 @@ model Project {
   assets       Asset[]
   directorPlan DirectorPlan?
   voiceTrack   VoiceTrack?
+  audioSources AudioSource[]
+  transcriptions Transcription[]
 
   @@index([status])
   @@index([createdAt])
@@ -162,9 +164,12 @@ model DirectorPlan {
   contentType       String
   summary           String
   creativeDirection String
-  brandId           String?
-  productId         String?
-  generatedAt       DateTime @default(now())
+  brandId               String?
+  productId             String?
+  sourceType            String   @default("SCRIPT")
+  sourceTranscriptionId String?
+  sourceAudioHash       String?
+  generatedAt           DateTime @default(now())
 
   project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
   scenes            DirectorScene[]
@@ -172,6 +177,8 @@ model DirectorPlan {
 
   @@index([projectId])
   @@index([scriptHash])
+  @@index([sourceType])
+  @@index([sourceTranscriptionId])
   @@map("director_plans")
 }
 
@@ -245,4 +252,72 @@ model VoiceBoundary {
   @@index([voiceTrackId])
   @@map("voice_boundaries")
 }
+
+model AudioSource {
+  id                    String   @id @default(cuid())
+  projectId             String
+  storageRef            String
+  sourceHash            String
+  mimeType              String
+  sizeBytes             Int
+  durationMs            Int?
+  originalDisplayName   String?
+  activeTranscriptionId String?
+  createdAt             DateTime @default(now())
+
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  transcriptions Transcription[]
+
+  @@index([projectId])
+  @@index([sourceHash])
+  @@map("audio_sources")
+}
+
+model Transcription {
+  id                String   @id @default(cuid())
+  projectId         String
+  audioSourceId     String
+  provider          String
+  model             String
+  requestedMode     String
+  displayText       String
+  canonicalText     String
+  detectedLanguage  String?
+  durationMs        Int
+  wordCount         Int
+  sourceAudioHash   String
+  configurationHash String
+  createdAt         DateTime @default(now())
+
+  project     Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  audioSource AudioSource         @relation(fields: [audioSourceId], references: [id], onDelete: Cascade)
+  words       TranscriptionWord[]
+
+  @@index([projectId])
+  @@index([audioSourceId])
+  @@index([sourceAudioHash])
+  @@index([configurationHash])
+  @@map("transcriptions")
+}
+
+model TranscriptionWord {
+  id              String   @id @default(cuid())
+  transcriptionId String
+  sequence        Int
+  text            String
+  startMs         Int
+  endMs           Int
+  sourceStart     Int
+  sourceEnd       Int
+  speaker         String?
+  confidence      Float?
+  locale          String?
+
+  transcription Transcription @relation(fields: [transcriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([transcriptionId, sequence])
+  @@index([transcriptionId])
+  @@map("transcription_words")
+}
+
 

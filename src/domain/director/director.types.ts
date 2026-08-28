@@ -147,6 +147,9 @@ export interface DirectorPlan {
   creativeDirection: string;
   brandId: string | null;
   productId: string | null;
+  sourceType?: string;
+  sourceTranscriptionId?: string | null;
+  sourceAudioHash?: string | null;
   generatedAt: Date;
   scenes: DirectorScene[];
 }
