@@ -86,6 +86,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
 
     const voiceMap = new Map<string, VoiceProfile>();
     const seenTokens = new Set<string>();
+    let outcome: "COMPLETE" | "BOUNDED_COMPLETE" | "FAILED" = "FAILED";
 
     try {
       let pageToken: string | undefined = undefined;
@@ -102,6 +103,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
               operation: "voice_discovery",
               category: "PAGINATION_CYCLE_DETECTED",
             });
+            outcome = "FAILED";
             break;
           }
           seenTokens.add(pageToken);
@@ -153,6 +155,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
             status,
             page: pageCount,
           });
+          outcome = "FAILED";
           break;
         }
 
@@ -167,6 +170,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
             category: "MALFORMED_RESPONSE",
             page: pageCount,
           });
+          outcome = "FAILED";
           break;
         }
 
@@ -179,6 +183,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
             category: "MALFORMED_RESPONSE",
             page: pageCount,
           });
+          outcome = "FAILED";
           break;
         }
 
@@ -211,12 +216,26 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
           });
         }
 
+        // Check completion condition
+        if (data.has_more === false) {
+          outcome = "COMPLETE";
+          break;
+        }
+
+        // If has_more is true (or non-false), a valid non-empty next_page_token is strictly required
         if (
-          !data.has_more ||
           !data.next_page_token ||
           typeof data.next_page_token !== "string" ||
           data.next_page_token.trim().length === 0
         ) {
+          logger.warn({
+            event: "elevenlabs.list_voices_failed",
+            provider: "ELEVENLABS",
+            operation: "voice_discovery",
+            category: "MALFORMED_RESPONSE",
+            page: pageCount,
+          });
+          outcome = "FAILED";
           break;
         }
 
@@ -228,10 +247,24 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
             operation: "voice_discovery",
             category: "PAGINATION_CYCLE_DETECTED",
           });
+          outcome = "FAILED";
+          break;
+        }
+
+        if (pageCount >= ELEVENLABS_DISCOVERY_MAX_PAGES) {
+          outcome = "BOUNDED_COMPLETE";
           break;
         }
 
         pageToken = nextTok;
+      }
+
+      if (pageCount >= ELEVENLABS_DISCOVERY_MAX_PAGES && outcome !== "FAILED") {
+        outcome = "BOUNDED_COMPLETE";
+      }
+
+      if (outcome !== "COMPLETE" && outcome !== "BOUNDED_COMPLETE") {
+        return [];
       }
 
       if (voiceMap.size === 0) {

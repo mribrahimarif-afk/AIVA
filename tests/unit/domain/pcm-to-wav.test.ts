@@ -79,4 +79,33 @@ describe("PCM to WAV Conversion & Duration Tests", () => {
     expect(computePcm24kDurationMs(0)).toBe(0);
     expect(computePcm24kDurationMs(-100)).toBe(0);
   });
+
+  describe("validateAndDecodeBase64Audio Strict Validation & Pad-Bit Tests", () => {
+    it("rejects non-canonical Base64 pad-bits (e.g. Zh== vs canonical Zg==)", async () => {
+      const { validateAndDecodeBase64Audio } = await import("@/domain/voice/pcm-to-wav");
+
+      // 'Zh==' has non-zero unused pad bits; Node decodes it as 0x66, whose canonical encoding is 'Zg=='
+      expect(() => validateAndDecodeBase64Audio("Zh==")).toThrow(DomainError);
+      try {
+        validateAndDecodeBase64Audio("Zh==");
+      } catch (err: unknown) {
+        expect((err as DomainError).code).toBe("REQUEST_FAILED");
+        expect((err as DomainError).message).toContain("not in canonical");
+      }
+
+      // 'Zg==' is canonically encoded for 0x66 (1 byte), but 16-bit PCM requires even byte alignment
+      expect(() => validateAndDecodeBase64Audio("Zg==")).toThrow(DomainError);
+      try {
+        validateAndDecodeBase64Audio("Zg==");
+      } catch (err: unknown) {
+        expect((err as DomainError).code).toBe("REQUEST_FAILED");
+        expect((err as DomainError).message).toContain("not a multiple of 2");
+      }
+
+      // Canonical 2-byte zero PCM (1 sample)
+      const validCanonical = Buffer.from([0x12, 0x34]).toString("base64");
+      const decoded = validateAndDecodeBase64Audio(validCanonical);
+      expect(decoded).toEqual(Buffer.from([0x12, 0x34]));
+    });
+  });
 });

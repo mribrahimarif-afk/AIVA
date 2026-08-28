@@ -503,7 +503,7 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices[1]?.description).toBe("Urdu narrator");
     });
 
-    it("paginates across multiple pages using next_page_token until has_more is false", async () => {
+    it("normal has_more=false completion returns accumulated voices across pages", async () => {
       const calls: string[] = [];
 
       const fetchFn = vi.fn().mockImplementation(async (url: string) => {
@@ -551,7 +551,7 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices.map((v) => v.name)).toEqual(["v_page1_1", "v_page2_1"]);
     });
 
-    it("enforces pagination hard bound (stops after 5 pages even if has_more remains true)", async () => {
+    it("enforces intentional page-5 hard bound completion and returns bounded accumulated catalogue", async () => {
       let callCount = 0;
       const fetchFn = vi.fn().mockImplementation(async () => {
         callCount++;
@@ -572,9 +572,179 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       // Exactly 5 pages maximum
       expect(callCount).toBe(5);
       expect(voices).toHaveLength(5);
+      expect(voices.map((v) => v.voiceId)).toEqual([
+        "v_infinite_1",
+        "v_infinite_2",
+        "v_infinite_3",
+        "v_infinite_4",
+        "v_infinite_5",
+      ]);
     });
 
-    it("detects immediate pagination token repetition (A -> A) and terminates loop", async () => {
+    it("page 1 success -> page 2 HTTP 429 fails closed and returns empty array", async () => {
+      const fetchFn = vi.fn().mockImplementation(async (url: string) => {
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get("next_page_token");
+
+        if (!token) {
+          // Page 1 succeeds
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_p1", name: "Voice 1" }],
+              has_more: true,
+              next_page_token: "tok_2",
+            }),
+          } as Response;
+        }
+
+        // Page 2 rate limited
+        return {
+          ok: false,
+          status: 429,
+        } as Response;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("page 1 success -> page 2 HTTP 502 fails closed and returns empty array", async () => {
+      const fetchFn = vi.fn().mockImplementation(async (url: string) => {
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get("next_page_token");
+
+        if (!token) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_p1", name: "Voice 1" }],
+              has_more: true,
+              next_page_token: "tok_2",
+            }),
+          } as Response;
+        }
+
+        return {
+          ok: false,
+          status: 502,
+        } as Response;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("page 1 success -> page 2 network rejection fails closed and returns empty array", async () => {
+      const fetchFn = vi.fn().mockImplementation(async (url: string) => {
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get("next_page_token");
+
+        if (!token) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_p1", name: "Voice 1" }],
+              has_more: true,
+              next_page_token: "tok_2",
+            }),
+          } as Response;
+        }
+
+        throw new TypeError("fetch failed");
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("page 1 success -> page 2 timeout fails closed and returns empty array", async () => {
+      const fetchFn = vi.fn().mockImplementation(async (url: string) => {
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get("next_page_token");
+
+        if (!token) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_p1", name: "Voice 1" }],
+              has_more: true,
+              next_page_token: "tok_2",
+            }),
+          } as Response;
+        }
+
+        const abortError = new Error("The operation was aborted");
+        abortError.name = "AbortError";
+        throw abortError;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("page 1 success -> page 2 malformed JSON fails closed and returns empty array", async () => {
+      const fetchFn = vi.fn().mockImplementation(async (url: string) => {
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get("next_page_token");
+
+        if (!token) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_p1", name: "Voice 1" }],
+              has_more: true,
+              next_page_token: "tok_2",
+            }),
+          } as Response;
+        }
+
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError("Unexpected token in JSON");
+          },
+        } as unknown as Response;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("page 1 success -> page 2 malformed token state (whitespace token with has_more=true) fails closed and returns empty array", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          voices: [{ voice_id: "v_1", name: "Voice 1" }],
+          has_more: true,
+          next_page_token: "   ", // whitespace token while has_more is true
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("detects immediate pagination token repetition (A -> A) and fails closed returning empty array", async () => {
       let callCount = 0;
       const fetchFn = vi.fn().mockImplementation(async () => {
         callCount++;
@@ -592,12 +762,12 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
 
-      // Page 1 yields token_repeat_A, Page 2 receives token_repeat_A and terminates
+      // Fails closed on cycle detection
       expect(callCount).toBe(2);
-      expect(voices).toHaveLength(2);
+      expect(voices).toEqual([]);
     });
 
-    it("detects multi-token pagination cycle (A -> B -> A) and terminates before repeating request", async () => {
+    it("detects multi-token pagination cycle (A -> B -> A) and fails closed returning empty array", async () => {
       const requestedTokens: Array<string | null> = [];
       const fetchFn = vi.fn().mockImplementation(async (url: string) => {
         const parsedUrl = new URL(url);
@@ -649,9 +819,8 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
 
-      // Page 1 (null), Page 2 (token_A), Page 3 (token_B). Cycle detected at end of Page 3 before requesting token_A again!
       expect(requestedTokens).toEqual([null, "token_A", "token_B"]);
-      expect(voices).toHaveLength(3);
+      expect(voices).toEqual([]);
     });
 
     it("deduplicates voices by stable voice_id across paginated responses", async () => {
@@ -694,85 +863,6 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices).toHaveLength(3);
       expect(voices.map((v) => v.name)).toEqual(["dup_voice_1", "unique_voice_2", "unique_voice_3"]);
       expect(voices[0]?.displayName).toBe("Original 1"); // Preserves first occurrence
-    });
-
-    it("returns empty array on actual HTTP 429 rate limit without fabricating voices", async () => {
-      const fetchFn = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 429,
-      } as Response);
-
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
-      const voices = await provider.listVoices();
-
-      expect(voices).toEqual([]);
-      expect(voices.some((v) => v.voiceId === "21m00Tcm4TlvDq8ikWAM")).toBe(false);
-      expect(voices.some((v) => v.voiceId === "pNInz6obpgDQGcFmaJgB")).toBe(false);
-    });
-
-    it("returns empty array on actual HTTP 5xx upstream unavailable", async () => {
-      const fetchFn = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 502,
-      } as Response);
-
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
-      const voices = await provider.listVoices();
-
-      expect(voices).toEqual([]);
-    });
-
-    it("returns empty array on network rejection (TypeError: fetch failed)", async () => {
-      const fetchFn = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
-
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
-      const voices = await provider.listVoices();
-
-      expect(voices).toEqual([]);
-    });
-
-    it("returns empty array on timeout / AbortError", async () => {
-      const abortError = new Error("The operation was aborted");
-      abortError.name = "AbortError";
-      const fetchFn = vi.fn().mockRejectedValue(abortError);
-
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
-      const voices = await provider.listVoices();
-
-      expect(voices).toEqual([]);
-    });
-
-    it("returns empty array on invalid JSON or malformed discovery response", async () => {
-      const fetchFn = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => {
-          throw new SyntaxError("Unexpected token < in JSON at position 0");
-        },
-      } as unknown as Response);
-
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
-      const voices = await provider.listVoices();
-
-      expect(voices).toEqual([]);
-    });
-
-    it("returns empty array on malformed pagination token (e.g. empty or non-string)", async () => {
-      const fetchFn = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          voices: [{ voice_id: "v_1", name: "Voice 1" }],
-          has_more: true,
-          next_page_token: "   ", // whitespace token
-        }),
-      } as Response);
-
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
-      const voices = await provider.listVoices();
-
-      expect(voices).toHaveLength(1);
-      expect(voices[0]?.voiceId).toBe("v_1");
     });
 
     it("proves discovery failure does not invoke synthesis or make synthesis requests", async () => {

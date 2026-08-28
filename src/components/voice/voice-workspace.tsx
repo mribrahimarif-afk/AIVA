@@ -94,7 +94,17 @@ export function VoiceWorkspace({
     selectedProvider === "AZURE" ? isAzureConfig : elevenLabsConfigured;
 
   const currentVoiceList = selectedProvider === "AZURE" ? activeAzureVoices : elevenLabsVoices;
-  const canGenerate = isCurrentProviderConfigured && currentVoiceList.length > 0 && selectedVoice.trim().length > 0;
+
+  const selectedVoiceIsAvailable =
+    selectedProvider === "AZURE"
+      ? activeAzureVoices.some((v) => v.name === selectedVoice || v.voiceId === selectedVoice)
+      : elevenLabsVoices.some((v) => (v.voiceId || v.name) === selectedVoice);
+
+  const canGenerate =
+    isCurrentProviderConfigured &&
+    currentVoiceList.length > 0 &&
+    selectedVoice.trim().length > 0 &&
+    selectedVoiceIsAvailable;
 
   async function handleGenerateVoice(force = false) {
     if (isGenerating || !canGenerate) return;

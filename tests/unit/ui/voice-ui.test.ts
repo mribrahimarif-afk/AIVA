@@ -232,4 +232,55 @@ describe("VoiceWorkspace UI Component Tests", () => {
     expect(html).toContain('value="custom_voice_1"');
     expect(html).toContain("Custom Voice One");
   });
+
+  describe("selectedVoiceIsAvailable Catalogue Membership Tests", () => {
+    it("proves ElevenLabs selectedVoice absent from current catalogue disables generation and does not select unavailable voice", () => {
+      const inaccessibleTrack: VoiceTrackDto = {
+        ...mockElevenLabsTrack,
+        voiceName: "inaccessible_old_voice_id",
+      };
+
+      const html = renderToString(
+        React.createElement(VoiceWorkspace, {
+          projectId: "proj_123",
+          hasDirectorPlan: true,
+          isConfigured: true,
+          azureConfigured: true,
+          elevenLabsConfigured: true,
+          initialVoiceTrack: inaccessibleTrack,
+          elevenLabsVoices: mockElevenLabsVoices, // Contains custom_voice_1, custom_voice_2 (NOT inaccessible_old_voice_id)
+        })
+      );
+
+      // Must fall back to first valid discovered voice (custom_voice_1) and NOT keep inaccessible_old_voice_id
+      expect(html).not.toContain('value="inaccessible_old_voice_id"');
+      expect(html).toContain('value="custom_voice_1"');
+      expect(html).toContain("Regenerate Voice");
+    });
+
+    it("proves stale-track 'Regenerate Now' cannot submit inaccessible voice when catalogue is empty", () => {
+      const staleInaccessibleTrack: VoiceTrackDto = {
+        ...mockElevenLabsTrack,
+        voiceName: "inaccessible_voice_xyz",
+      };
+
+      const html = renderToString(
+        React.createElement(VoiceWorkspace, {
+          projectId: "proj_123",
+          hasDirectorPlan: true,
+          isConfigured: true,
+          azureConfigured: true,
+          elevenLabsConfigured: true,
+          directorScriptHash: "hash_updated_new_script",
+          initialVoiceTrack: staleInaccessibleTrack,
+          elevenLabsVoices: [], // Empty catalogue
+        })
+      );
+
+      expect(html).toContain("Script Updated");
+      expect(html).not.toContain("Regenerate Now");
+      expect(html).not.toContain("Regenerate Voice");
+      expect(html).toContain("Unable to load ElevenLabs voices");
+    });
+  });
 });

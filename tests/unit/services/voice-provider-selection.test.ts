@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import crypto from "node:crypto";
 import { VoiceService } from "@/services/voice.service";
 import { FakeVoiceProvider } from "../../mocks/fake-voice.provider";
@@ -364,6 +364,56 @@ describe("Voice Provider Selection & Credit-Safe Reuse Tests", () => {
 
       // Second voice must synthesize freshly
       expect(elevenLabsSynthesizeCalled).toBe(2);
+    });
+  });
+
+  describe("Zero Storage / Repository Persistence Spy on Audio Validation Failure", () => {
+    it("proves 0 storage staging, 0 DB persistence, and 0 boundary writes when provider yields malformed audio", async () => {
+      const stageSpy = vi.fn().mockResolvedValue({
+        storageKey: "projects/p1/voice/audio.wav",
+        filePath: "/storage/audio.wav",
+        fileSizeBytes: 1024,
+      });
+      const replaceTrackSpy = vi.fn().mockResolvedValue(inMemoryTrack);
+
+      const customStorageService = {
+        stageAndPublishAudio: stageSpy,
+        getAudioStream: vi.fn(),
+        deleteProjectVoiceAudio: vi.fn(),
+      } as unknown as VoiceStorageService;
+
+      const customTrackRepo = {
+        getCurrentForProject: vi.fn().mockResolvedValue(null),
+        replaceTrack: replaceTrackSpy,
+      } as unknown as VoiceTrackRepository;
+
+      // Provider throws ProviderError / DomainError on malformed audio
+      const failingAudioProvider = new FakeVoiceProvider({
+        isConfigured: true,
+        errorToThrow: new DomainError("INVALID_AUDIO_FORMAT", "Base64 audio payload is not canonical"),
+      });
+      Object.defineProperty(failingAudioProvider, "id", { value: "elevenlabs" });
+
+      const testService = new VoiceService({
+        projectRepository: mockProjectRepo as ProjectRepository,
+        directorPlanRepository: mockDirectorPlanRepo as DirectorPlanRepository,
+        voiceTrackRepository: customTrackRepo,
+        voiceProviders: {
+          elevenlabs: failingAudioProvider,
+        },
+        voiceStorageService: customStorageService,
+      });
+
+      await expect(
+        testService.generateVoice(projectId, {
+          provider: "ELEVENLABS",
+          voiceName: "voice_sample",
+        })
+      ).rejects.toThrow(DomainError);
+
+      // Verify zero storage calls and zero repository calls
+      expect(stageSpy).toHaveBeenCalledTimes(0);
+      expect(replaceTrackSpy).toHaveBeenCalledTimes(0);
     });
   });
 });

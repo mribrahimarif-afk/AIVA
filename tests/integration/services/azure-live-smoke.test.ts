@@ -8,7 +8,8 @@ describe("Azure Speech Live Smoke Test (Opt-in)", () => {
     env.AZURE_SPEECH_KEY &&
       env.AZURE_SPEECH_KEY.trim().length > 0 &&
       env.AZURE_SPEECH_REGION &&
-      env.AZURE_SPEECH_REGION.trim().length > 0
+      env.AZURE_SPEECH_REGION.trim().length > 0 &&
+      process.env.RUN_LIVE_TESTS === "true"
   );
 
   const testFn = isConfigured ? it : it.skip;
