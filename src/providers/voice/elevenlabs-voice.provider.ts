@@ -79,7 +79,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
 
   async listVoices(): Promise<VoiceProfile[]> {
     if (!this.isConfigured()) {
-      return this.getFallbackVoices();
+      return [];
     }
 
     const voiceMap = new Map<string, VoiceProfile>();
@@ -176,7 +176,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
       }
 
       if (voiceMap.size === 0) {
-        return this.getFallbackVoices();
+        return [];
       }
 
       return Array.from(voiceMap.values());
@@ -185,34 +185,8 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
         event: "elevenlabs.list_voices_error",
         error: err instanceof Error ? err.message : "Unknown error",
       });
-      return this.getFallbackVoices();
+      return [];
     }
-  }
-
-  private getFallbackVoices(): VoiceProfile[] {
-    return [
-      {
-        name: "21m00Tcm4TlvDq8ikWAM",
-        displayName: "Rachel (Multilingual)",
-        language: "Multilingual",
-        locale: "multilingual",
-        gender: "Female",
-        description: "Calm and natural narration",
-        isDefault: true,
-        provider: "ELEVENLABS",
-        voiceId: "21m00Tcm4TlvDq8ikWAM",
-      },
-      {
-        name: "pNInz6obpgDQGcFmaJgB",
-        displayName: "Adam (Multilingual)",
-        language: "Multilingual",
-        locale: "multilingual",
-        gender: "Male",
-        description: "Deep and clear narration",
-        provider: "ELEVENLABS",
-        voiceId: "pNInz6obpgDQGcFmaJgB",
-      },
-    ];
   }
 
   async synthesize(options: VoiceSynthesisOptions): Promise<VoiceSynthesisResult> {

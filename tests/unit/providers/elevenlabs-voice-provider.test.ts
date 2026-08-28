@@ -440,14 +440,108 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices[0]?.displayName).toBe("Original 1"); // Preserves first occurrence
     });
 
-    it("returns safe fallback voices when API call fails without crashing Azure", async () => {
-      const fetchFn = vi.fn().mockRejectedValue(new Error("Network down"));
+    it("returns empty array on 401 unauthorized without fabricating Rachel or Adam", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "invalid_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+      expect(voices.some((v) => v.voiceId === "21m00Tcm4TlvDq8ikWAM")).toBe(false);
+      expect(voices.some((v) => v.voiceId === "pNInz6obpgDQGcFmaJgB")).toBe(false);
+    });
+
+    it("returns empty array on 403 forbidden without fabricating fallback catalogue", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+      } as Response);
 
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
 
-      expect(voices.length).toBeGreaterThan(0);
-      expect(voices[0]?.displayName).toContain("Rachel");
+      expect(voices).toEqual([]);
+    });
+
+    it("returns empty array on 429 rate limit without fabricating fallback catalogue", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 402,
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("returns empty array on 5xx, network failure, or timeout without fabricating voices", async () => {
+      const fetchFn = vi.fn().mockRejectedValue(new Error("Network connection reset"));
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+      expect(voices).toHaveLength(0);
+    });
+
+    it("returns empty array on invalid JSON or malformed discovery response", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ voices: "not an array" }),
+      } as unknown as Response);
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+    });
+
+    it("ensures unconfigured provider returns empty array without hardcoded fallback IDs", async () => {
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "" });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+      expect(voices.some((v) => v.voiceId === "21m00Tcm4TlvDq8ikWAM")).toBe(false);
+      expect(voices.some((v) => v.voiceId === "pNInz6obpgDQGcFmaJgB")).toBe(false);
+    });
+
+    it("proves discovery failure does not invoke synthesis or make synthesis requests", async () => {
+      const fetchCalls: Array<{ url: string; method?: string }> = [];
+      const fetchFn = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+        fetchCalls.push({ url, method: init?.method });
+        return { ok: false, status: 500 } as Response;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      expect(voices).toEqual([]);
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]?.url).toContain("/v2/voices");
+      expect(fetchCalls[0]?.method).toBe("GET");
+      // Proves NO text-to-speech / with-timestamps synthesis call was triggered!
+      expect(fetchCalls.some((c) => c.url.includes("text-to-speech"))).toBe(false);
+    });
+
+    it("proves Azure Speech provider operates independently even when ElevenLabs discovery fails", async () => {
+      const failingElevenFetch = vi.fn().mockRejectedValue(new Error("ElevenLabs API down"));
+      const elevenProvider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: failingElevenFetch as never });
+
+      const elevenVoices = await elevenProvider.listVoices();
+      expect(elevenVoices).toEqual([]);
+
+      // Azure discovery functions normally
+      const { AzureVoiceProvider } = await import("@/providers/voice/azure-voice.provider");
+      const azureProvider = new AzureVoiceProvider({ apiKey: "az_key", region: "eastus" });
+      const azureVoices = await azureProvider.listVoices();
+
+      expect(azureVoices.length).toBeGreaterThan(0);
+      expect(azureVoices.some((v) => v.provider === "AZURE")).toBe(true);
     });
   });
 });

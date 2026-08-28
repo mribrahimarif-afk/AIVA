@@ -257,8 +257,18 @@ export function VoiceWorkspace({
             </div>
           )}
 
+          {/* Empty Voice List Notice */}
+          {isCurrentProviderConfigured && currentVoiceList.length === 0 && (
+            <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm">
+              <p className="font-semibold">Unable to load {selectedProvider === "ELEVENLABS" ? "ElevenLabs" : "Azure"} voices.</p>
+              <p className="mt-1 text-amber-300/80">
+                No accessible voices were returned by the provider. Please verify your API key and network connection.
+              </p>
+            </div>
+          )}
+
           {/* Voice Selector & Actions */}
-          {isCurrentProviderConfigured && (
+          {isCurrentProviderConfigured && currentVoiceList.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
               <div className="sm:col-span-2 space-y-1.5">
                 <label htmlFor="voice-select" className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
