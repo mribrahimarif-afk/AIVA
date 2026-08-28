@@ -200,19 +200,18 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
 
       const finalizeJson = (await finalizeResponse.json()) as {
         file?: { name?: string; uri?: string; mimeType?: string };
-        name?: string;
-        uri?: string;
       };
 
-      uploadedFileName = finalizeJson.file?.name || finalizeJson.name;
-      uploadedFileUri = finalizeJson.file?.uri || finalizeJson.uri;
-
-      if (!uploadedFileName || !uploadedFileUri) {
+      const file = finalizeJson.file;
+      if (!file || typeof file.name !== "string" || typeof file.uri !== "string" || file.name.trim().length === 0 || file.uri.trim().length === 0) {
         throw new ProviderError(this.id, "Gemini transcription returned a malformed response.", {
           code: "MALFORMED_RESPONSE",
           provider: this.id,
         });
       }
+
+      uploadedFileName = file.name;
+      uploadedFileUri = file.uri;
 
       // Check remaining deadline budget before interactions.create
       const elapsedSoFarMs = Date.now() - startTime;
@@ -241,7 +240,7 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
             input: [
               {
                 type: "audio",
-                file_uri: uploadedFileUri,
+                uri: uploadedFileUri,
                 mime_type: mimeType,
               },
             ],

@@ -145,7 +145,8 @@ describe("GeminiTranscribeProvider — Official Resumable Transport, Strict word
     expect(interactionCall.headers["x-goog-api-key"]).toBe(testApiKey);
     const interactionBody = JSON.parse(interactionCall.body as string);
     expect(interactionBody.model).toBe("gemini-3.5-transcribe");
-    expect(interactionBody.input[0].file_uri).toBe("https://generativelanguage.googleapis.com/v1beta/files/audio-file-uuid");
+    expect(interactionBody.input[0].uri).toBe("https://generativelanguage.googleapis.com/v1beta/files/audio-file-uuid");
+    expect(interactionBody.input[0].file_uri).toBeUndefined();
     expect(interactionBody.input[0].mime_type).toBe("audio/wav");
     expect(interactionBody.generation_config.transcription_config.mode.type).toBe("verbatim");
 
@@ -709,5 +710,160 @@ describe("GeminiTranscribeProvider — Official Resumable Transport, Strict word
         requestedMode: "GEMINI",
       })
     ).rejects.toThrow();
+  });
+
+  // =========================================================================
+  // 6. Strict Finalized File Response Validation & Negative Tests
+  // =========================================================================
+  describe("Finalized File Response Validation", () => {
+    it("rejects finalized response with top-level uri/name and missing 'file' wrapper (fails closed without calling interactions)", async () => {
+      let interactionsCalled = false;
+
+      const mockFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const urlStr = url.toString();
+        if (urlStr === "https://generativelanguage.googleapis.com/upload/v1beta/files") {
+          return new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files/session-top-level" },
+          });
+        }
+
+        if (urlStr.includes("session-top-level")) {
+          // Undocumented / top-level alias shape: missing `file` wrapper!
+          return new Response(
+            JSON.stringify({
+              name: "files/audio-top-level",
+              uri: "https://generativelanguage.googleapis.com/v1beta/files/audio-top-level",
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (urlStr.includes("v1beta/interactions")) {
+          interactionsCalled = true;
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+
+      const provider = new GeminiTranscribeProvider({
+        apiKey: testApiKey,
+        timeoutMs: 2000,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      await expect(
+        provider.transcribe({
+          audioBuffer: dummyAudio,
+          mimeType: "audio/wav",
+          projectId: "proj-1",
+          audioSourceId: "src-1",
+          requestedMode: "GEMINI",
+        })
+      ).rejects.toThrow(ProviderError);
+
+      expect(interactionsCalled).toBe(false);
+    });
+
+    it("rejects finalized response when file.uri is missing", async () => {
+      let interactionsCalled = false;
+
+      const mockFetch = vi.fn(async (url: string | URL | Request) => {
+        const urlStr = url.toString();
+        if (urlStr === "https://generativelanguage.googleapis.com/upload/v1beta/files") {
+          return new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files/session-no-uri" },
+          });
+        }
+
+        if (urlStr.includes("session-no-uri")) {
+          return new Response(
+            JSON.stringify({
+              file: {
+                name: "files/audio-no-uri",
+              },
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (urlStr.includes("v1beta/interactions")) {
+          interactionsCalled = true;
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+
+      const provider = new GeminiTranscribeProvider({
+        apiKey: testApiKey,
+        timeoutMs: 2000,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      await expect(
+        provider.transcribe({
+          audioBuffer: dummyAudio,
+          mimeType: "audio/wav",
+          projectId: "proj-1",
+          audioSourceId: "src-1",
+          requestedMode: "GEMINI",
+        })
+      ).rejects.toThrow(ProviderError);
+
+      expect(interactionsCalled).toBe(false);
+    });
+
+    it("rejects finalized response when file.name is missing", async () => {
+      let interactionsCalled = false;
+
+      const mockFetch = vi.fn(async (url: string | URL | Request) => {
+        const urlStr = url.toString();
+        if (urlStr === "https://generativelanguage.googleapis.com/upload/v1beta/files") {
+          return new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files/session-no-name" },
+          });
+        }
+
+        if (urlStr.includes("session-no-name")) {
+          return new Response(
+            JSON.stringify({
+              file: {
+                uri: "https://generativelanguage.googleapis.com/v1beta/files/audio-no-name",
+              },
+            }),
+            { status: 200 }
+          );
+        }
+
+        if (urlStr.includes("v1beta/interactions")) {
+          interactionsCalled = true;
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+
+      const provider = new GeminiTranscribeProvider({
+        apiKey: testApiKey,
+        timeoutMs: 2000,
+        fetchFn: mockFetch as unknown as typeof fetch,
+      });
+
+      await expect(
+        provider.transcribe({
+          audioBuffer: dummyAudio,
+          mimeType: "audio/wav",
+          projectId: "proj-1",
+          audioSourceId: "src-1",
+          requestedMode: "GEMINI",
+        })
+      ).rejects.toThrow(ProviderError);
+
+      expect(interactionsCalled).toBe(false);
+    });
   });
 });
