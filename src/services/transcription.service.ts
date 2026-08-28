@@ -1,8 +1,8 @@
-import crypto from "node:crypto";
 import { NotFoundError, ValidationError } from "@/domain/errors";
 import {
   validateAudioUpload,
   MAX_AUDIO_DURATION_MS,
+  computeTranscriptionConfigHash,
   type AudioSourceInfo,
   type TranscriptionRecord,
   type TranscribeRequestInput,
@@ -140,18 +140,12 @@ export class TranscriptionService {
       });
     }
 
-    // 2. Compute configuration reuse hash
-    const requestedMode = mode.toUpperCase();
-    const configString =
-      requestedMode === "AUTO"
-        ? `${audioSource.sourceHash}:AUTO:v1`
-        : `${audioSource.sourceHash}:${requestedMode}:${this.transcriptionProvider.id}:${this.transcriptionProvider.modelName}`;
-
-    const configurationHash = crypto
-      .createHash("sha256")
-      .update(configString)
-      .digest("hex")
-      .toLowerCase();
+    // 2. Compute deterministic configuration reuse hash
+    const requestedMode = mode as "AUTO" | "GEMINI" | "AZURE" | "ELEVENLABS";
+    const configurationHash = computeTranscriptionConfigHash({
+      sourceAudioHash: audioSource.sourceHash,
+      requestedMode,
+    });
 
     // 3. Cost-safe reuse check: if not forcing, return existing accepted record
     if (!force) {

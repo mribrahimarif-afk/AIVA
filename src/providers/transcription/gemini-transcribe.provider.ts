@@ -74,56 +74,171 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
       uploadedFileName = fileUploadResult.name;
 
       // 2. Execute Transcription interaction with verbatim mode & word-level timestamps
-      const response = await this.client.models.generateContent({
-        model: this.modelName,
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                fileData: {
-                  fileUri: fileUploadResult.uri,
-                  mimeType: fileUploadResult.mimeType || mimeType,
-                },
+      let response: Record<string, unknown>;
+      const clientAny = this.client as unknown as Record<string, unknown>;
+
+      if (
+        clientAny.interactions &&
+        typeof (clientAny.interactions as { create?: unknown }).create === "function"
+      ) {
+        response = (await (
+          clientAny.interactions as {
+            create: (params: unknown) => Promise<Record<string, unknown>>;
+          }
+        ).create({
+          model: this.modelName,
+          input: [
+            {
+              type: "audio",
+              file_uri: fileUploadResult.uri,
+              mime_type: fileUploadResult.mimeType || mimeType,
+            },
+          ],
+          generation_config: {
+            transcription_config: {
+              mode: {
+                type: "verbatim",
+                timestamp_granularities: ["word"],
               },
-              {
-                text: "Transcribe the spoken audio verbatim. Return word-level timestamps.",
-              },
-            ],
+            },
           },
-        ],
-        config: {
-          // Gemini 3.5 Transcribe configuration
-          responseMimeType: "application/json",
-        },
-      });
+        })) as Record<string, unknown>;
+      } else {
+        const genResponse = await this.client.models.generateContent({
+          model: this.modelName,
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  fileData: {
+                    fileUri: fileUploadResult.uri,
+                    mimeType: fileUploadResult.mimeType || mimeType,
+                  },
+                },
+                {
+                  text: "Transcribe the spoken audio verbatim. Return word-level timestamps.",
+                },
+              ],
+            },
+          ],
+          config: {
+            responseMimeType: "application/json",
+          },
+        });
 
-      const responseText = response.text || "";
-      let parsedData: Record<string, unknown> | null = null;
-
-      try {
-        parsedData = JSON.parse(responseText) as Record<string, unknown>;
-      } catch {
-        // If the model did not return structured JSON, check candidates/parts for annotations
-        parsedData = response as unknown as Record<string, unknown>;
+        const responseText = genResponse.text || "";
+        try {
+          response = JSON.parse(responseText) as Record<string, unknown>;
+        } catch {
+          response = genResponse as unknown as Record<string, unknown>;
+        }
       }
 
-      // 3. Extract word timestamps and text
+      // 3. Extract word timestamps and text from official interaction structure
       const rawWords: RawTranscriptionWord[] = [];
       let detectedLanguage: string | null = null;
       let displayText = "";
 
-      if (parsedData && Array.isArray(parsedData.words)) {
-        displayText = typeof parsedData.text === "string" ? parsedData.text : "";
-        detectedLanguage = typeof parsedData.language === "string" ? parsedData.language : null;
-        for (const item of parsedData.words) {
+      if (typeof response.output_text === "string") {
+        displayText = response.output_text;
+      } else if (typeof response.text === "string") {
+        displayText = response.text;
+      }
+
+      if (typeof response.language === "string") {
+        detectedLanguage = response.language;
+      }
+
+      // Official Gemini 3.5 Transcribe format: interaction.steps[].content[].annotations[]
+      const steps = Array.isArray(response.steps)
+        ? response.steps
+        : Array.isArray((response as { interaction?: { steps?: unknown[] } }).interaction?.steps)
+          ? ((response as { interaction: { steps: unknown[] } }).interaction.steps as unknown[])
+          : null;
+
+      if (steps && Array.isArray(steps)) {
+        for (const stepItem of steps) {
+          const step = stepItem as { content?: unknown[] };
+          if (!Array.isArray(step?.content)) continue;
+
+          for (const contentItem of step.content) {
+            const content = contentItem as { annotations?: unknown[]; text?: string };
+            if (typeof content?.text === "string" && !displayText) {
+              displayText = content.text;
+            }
+
+            if (!Array.isArray(content?.annotations)) continue;
+
+            for (const annotationItem of content.annotations) {
+              const ann = annotationItem as Record<string, unknown>;
+              if (ann?.type === "word_info") {
+                const text = String(ann.text ?? "").trim();
+                if (!text) continue;
+
+                const startMs = this.parseOffsetToMs(
+                  ann.start_offset ?? ann.startOffset ?? ann.start
+                );
+                const endMs = this.parseOffsetToMs(
+                  ann.end_offset ?? ann.endOffset ?? ann.end
+                );
+
+                if (startMs === null || endMs === null) {
+                  throw new ProviderError(
+                    this.id,
+                    `Malformed or missing timestamp offset in Gemini word_info annotation: start=${String(ann.start_offset)}, end=${String(ann.end_offset)}`,
+                    { code: "MALFORMED_RESPONSE" }
+                  );
+                }
+
+                if (endMs < startMs) {
+                  throw new ProviderError(
+                    this.id,
+                    `Invalid timing in Gemini word_info annotation: end (${endMs}ms) < start (${startMs}ms)`,
+                    { code: "MALFORMED_RESPONSE" }
+                  );
+                }
+
+                rawWords.push({
+                  text,
+                  startMs,
+                  endMs,
+                  speaker: typeof ann.speaker === "string" ? ann.speaker : null,
+                  confidence: typeof ann.confidence === "number" ? ann.confidence : null,
+                });
+              }
+            }
+          }
+        }
+      } else if (Array.isArray(response.words)) {
+        // Direct word list fallback if provided
+        for (const item of response.words) {
           const w = item as Record<string, unknown>;
           const text = String(w.text || w.word || "").trim();
           if (!text) continue;
 
-          // Parse start and end timestamps (which may be in seconds, ms, or timestamp strings)
-          const startMs = this.normalizeTimestampToMs(w.start ?? w.startMs ?? w.startTime);
-          const endMs = this.normalizeTimestampToMs(w.end ?? w.endMs ?? w.endTime);
+          const startMs = this.parseOffsetToMs(
+            w.start_offset ?? w.startOffset ?? w.start ?? w.startMs
+          );
+          const endMs = this.parseOffsetToMs(
+            w.end_offset ?? w.endOffset ?? w.end ?? w.endMs
+          );
+
+          if (startMs === null || endMs === null) {
+            throw new ProviderError(
+              this.id,
+              `Malformed or missing timestamp in Gemini word list: start=${String(w.start)}, end=${String(w.end)}`,
+              { code: "MALFORMED_RESPONSE" }
+            );
+          }
+
+          if (endMs < startMs) {
+            throw new ProviderError(
+              this.id,
+              `Invalid timing in Gemini word list: end (${endMs}ms) < start (${startMs}ms)`,
+              { code: "MALFORMED_RESPONSE" }
+            );
+          }
 
           rawWords.push({
             text,
@@ -133,31 +248,11 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
             confidence: typeof w.confidence === "number" ? w.confidence : null,
           });
         }
-      } else if (parsedData && Array.isArray(parsedData.candidates)) {
-        // Fallback extraction from candidates/parts
-        const candidate = parsedData.candidates[0] as {
-          content?: { parts?: Array<{ text?: string }> };
-        } | undefined;
-        const textContent =
-          candidate?.content?.parts?.map((p) => p.text || "").join(" ") || "";
-        displayText = textContent.trim();
-        // If no explicit word timestamps were returned, this is a malformed timestamp failure
-        throw new ProviderError(
-          this.id,
-          "Gemini transcription response is missing required word-level timestamp annotations",
-          { code: "MISSING_TIMESTAMPS" }
-        );
-      } else {
-        throw new ProviderError(
-          this.id,
-          "Gemini transcription response is structurally malformed",
-          { code: "MALFORMED_RESPONSE" }
-        );
       }
 
       // Handle NO_SPEECH
       if (rawWords.length === 0) {
-        if (parsedData?.noSpeech === true || displayText === "") {
+        if (response.noSpeech === true || displayText.trim() === "") {
           return {
             provider: this.id,
             model: this.modelName,
@@ -173,7 +268,7 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
         }
         throw new ProviderError(
           this.id,
-          "Gemini transcription returned non-empty text but zero valid word timestamps",
+          "Gemini transcription returned non-empty text but zero valid word_info timestamp annotations",
           { code: "MISSING_TIMESTAMPS" }
         );
       }
@@ -278,22 +373,33 @@ export class GeminiTranscribeProvider implements TranscriptionProvider {
     }
   }
 
-  private normalizeTimestampToMs(value: unknown): number {
+  /**
+   * Parses official Gemini duration strings (e.g. "0.100s", "1.250s", "0s") or numeric seconds
+   * deterministically into milliseconds. Rejects missing, negative, NaN, or non-finite values.
+   */
+  private parseOffsetToMs(value: unknown): number | null {
+    if (value === undefined || value === null || value === "") {
+      return null;
+    }
     if (typeof value === "number") {
-      // If value is in seconds (floating point < 1000 for realistic speech phrase), convert to ms
-      // If value is already integer milliseconds (e.g. 1500), keep as is
+      if (!Number.isFinite(value) || value < 0) return null;
+      // If integer > 10000, treat as already ms; otherwise convert seconds to ms
       return Number.isInteger(value) && value > 10000
         ? value
         : Math.round(value * (value < 1000 ? 1000 : 1));
     }
     if (typeof value === "string") {
-      if (value.endsWith("s")) {
-        const sec = parseFloat(value.slice(0, -1));
+      const trimmed = value.trim();
+      const match = trimmed.match(/^(\d+(?:\.\d+)?)s$/);
+      if (match && match[1]) {
+        const sec = parseFloat(match[1]);
+        if (!Number.isFinite(sec) || sec < 0) return null;
         return Math.round(sec * 1000);
       }
-      const num = parseFloat(value);
-      return Number.isFinite(num) ? Math.round(num * 1000) : 0;
+      const sec = parseFloat(trimmed);
+      if (!Number.isFinite(sec) || sec < 0) return null;
+      return Math.round(sec * (trimmed.endsWith("s") || sec < 1000 ? 1000 : 1));
     }
-    return 0;
+    return null;
   }
 }
