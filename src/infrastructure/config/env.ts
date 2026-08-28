@@ -9,6 +9,7 @@ const envSchema = z.object({
   AIVA_STORAGE_ROOT: z.string().trim().min(1).default("./storage"),
   AIVA_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(524288000), // Default: 500 MB limit
   AIVA_FFMPEG_PATH: z.string().trim().optional().default(""),
+  AIVA_FFPROBE_PATH: z.string().trim().optional().default(""),
   AIVA_DEFAULT_ASPECT_RATIO: z.enum(ASPECT_RATIOS).default("9:16"),
   AIVA_LOG_LEVEL: logLevelSchema.default("info"),
   GEMINI_API_KEY: z.string().optional().default(""),
@@ -29,6 +30,18 @@ const envSchema = z.object({
   VOICE_MAX_DURATION_MS: z.coerce.number().int().positive().max(3600000).default(600000),
   VOICE_SYNTHESIS_TIMEOUT_MS: z.coerce.number().int().positive().min(5000).max(300000).default(60000),
   VOICE_MAX_AUDIO_BYTES: z.coerce.number().int().positive().min(1024).max(104857600).default(67108864),
+  // Transcription configuration (TASK-004B Audio-First)
+  GEMINI_TRANSCRIBE_MODEL: z.string().trim().min(1).default("gemini-3.5-transcribe"),
+  GEMINI_TRANSCRIBE_TIMEOUT_MS: z.coerce.number().int().positive().default(45000),
+  AZURE_TRANSCRIBE_TIMEOUT_MS: z.coerce.number().int().positive().default(45000),
+  AZURE_TRANSCRIBE_API_VERSION: z.string().trim().default("2025-10-15"),
+  ELEVENLABS_STT_ENABLED: z
+    .preprocess((val) => val === "true" || val === true, z.boolean())
+    .default(false),
+  ELEVENLABS_STT_API_KEY: z.string().optional().default(""),
+  ELEVENLABS_STT_MODEL_ID: z.string().trim().min(1).default("scribe_v2"),
+  ELEVENLABS_STT_TIMEOUT_MS: z.coerce.number().int().positive().default(45000),
+  TRANSCRIBE_MAX_AUDIO_BYTES: z.coerce.number().int().positive().default(52428800), // Default 50 MB
   PEXELS_API_KEY: z.string().optional().default(""),
   PIXABAY_API_KEY: z.string().optional().default(""),
 });

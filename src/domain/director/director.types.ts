@@ -147,6 +147,30 @@ export interface DirectorPlan {
   creativeDirection: string;
   brandId: string | null;
   productId: string | null;
+  sourceType?: string;
+  sourceTranscriptionId?: string | null;
+  sourceAudioHash?: string | null;
+  isCurrent?: boolean;
   generatedAt: Date;
   scenes: DirectorScene[];
+}
+
+/**
+ * Evaluates whether a Director plan is current based on source provenance and active audio state.
+ */
+export function isDirectorPlanCurrent(
+  plan: DirectorPlan,
+  context: { activeTranscriptionId?: string | null } = {}
+): boolean {
+  if (plan.sourceType === "SCRIPT" || !plan.sourceType) {
+    return true;
+  }
+  if (plan.sourceType === "AUDIO_TRANSCRIPT") {
+    return Boolean(
+      plan.sourceTranscriptionId &&
+        context.activeTranscriptionId &&
+        plan.sourceTranscriptionId === context.activeTranscriptionId
+    );
+  }
+  return true;
 }

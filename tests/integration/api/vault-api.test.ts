@@ -67,7 +67,10 @@ describe("API Integration — Brands, Products & Vault", () => {
     formData.append("brandId", brand.id);
     formData.append("title", "LG Jingle");
 
-    const mp3Buffer = Buffer.from("ID3040000000000_AUDIO_STREAM_BINARY_DATA", "utf-8");
+    const mp3Buffer = Buffer.from(
+      `ID3040000000000_AUDIO_STREAM_BINARY_DATA_${Date.now()}_${Math.random()}`,
+      "utf-8"
+    );
     const file = new File([mp3Buffer], "jingle.mp3", { type: "audio/mpeg" });
     formData.append("file", file);
 

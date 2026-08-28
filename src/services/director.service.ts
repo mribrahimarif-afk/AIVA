@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { NotFoundError, ValidationError, ProviderError } from "@/domain/errors";
+import { NotFoundError, ValidationError, ProviderError, DataIntegrityError } from "@/domain/errors";
 import {
   UNITIZER_VERSION,
   DIRECTOR_SCHEMA_VERSION,
@@ -17,6 +17,8 @@ import type {
   ProjectRepository,
   BrandRepository,
   ProductRepository,
+  AudioSourceRepository,
+  TranscriptionRepository,
 } from "@/repositories";
 import type {
   DirectorAiProvider,
@@ -31,6 +33,8 @@ export interface DirectorServiceOptions {
   projectRepository: ProjectRepository;
   brandRepository: BrandRepository;
   productRepository: ProductRepository;
+  audioSourceRepository?: AudioSourceRepository;
+  transcriptionRepository?: TranscriptionRepository;
   directorAiProvider: DirectorAiProvider;
   logger: Logger;
   maxScriptChars?: number;
@@ -48,6 +52,8 @@ export function createDirectorService(options: DirectorServiceOptions): Director
     projectRepository,
     brandRepository,
     productRepository,
+    audioSourceRepository,
+    transcriptionRepository,
     directorAiProvider,
     logger,
     maxScriptChars = 50000,
@@ -63,7 +69,32 @@ export function createDirectorService(options: DirectorServiceOptions): Director
       if (!project) {
         throw new NotFoundError("Project not found", { projectId });
       }
-      return directorPlanRepository.findByProjectId(projectId);
+      const plan = await directorPlanRepository.findByProjectId(projectId);
+      if (!plan) return null;
+
+      if (plan.sourceType === "AUDIO_TRANSCRIPT") {
+        let isCurrent = false;
+
+        if (plan.sourceTranscriptionId && transcriptionRepository && audioSourceRepository) {
+          const transcription = await transcriptionRepository.findById(plan.sourceTranscriptionId);
+          if (transcription && transcription.projectId === projectId) {
+            const owningSource = await audioSourceRepository.findById(transcription.audioSourceId);
+            if (owningSource && owningSource.projectId === projectId && owningSource.activeTranscriptionId === plan.sourceTranscriptionId) {
+              isCurrent = true;
+            }
+          }
+        }
+
+        return {
+          ...plan,
+          isCurrent,
+        };
+      }
+
+      return {
+        ...plan,
+        isCurrent: true,
+      };
     },
 
     async analyzeAndPlan(projectId: string, input: AnalyzeScriptInput): Promise<DirectorPlan> {
@@ -75,8 +106,69 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         throw new NotFoundError("Project not found", { projectId });
       }
 
-      // 2. Validate script
-      const script = input.script;
+      let script = input.script;
+      let sourceAudioHash = input.sourceAudioHash ?? null;
+      const sourceTranscriptionId = input.sourceTranscriptionId ?? null;
+      const sourceType = input.sourceType || "SCRIPT";
+
+      // 2. Validate Audio-First provenance before any AI call
+      if (sourceType === "AUDIO_TRANSCRIPT") {
+        if (!sourceTranscriptionId) {
+          throw new ValidationError(
+            "sourceTranscriptionId is required when creating an Audio-First Director plan"
+          );
+        }
+
+        if (!transcriptionRepository) {
+          throw new DataIntegrityError("Transcription repository is not configured on DirectorService");
+        }
+
+        const transcription = await transcriptionRepository.findById(sourceTranscriptionId);
+        if (!transcription) {
+          throw new NotFoundError("Referenced transcription not found", {
+            sourceTranscriptionId,
+          });
+        }
+
+        if (transcription.projectId !== projectId) {
+          throw new ValidationError(
+            "Referenced transcription belongs to a different project",
+            { sourceTranscriptionId, requestedProjectId: projectId, actualProjectId: transcription.projectId }
+          );
+        }
+
+        if (audioSourceRepository) {
+          const owningSource = await audioSourceRepository.findById(transcription.audioSourceId);
+          if (!owningSource || owningSource.projectId !== projectId) {
+            throw new ValidationError(
+              "Owning AudioSource does not belong to this project",
+              { audioSourceId: transcription.audioSourceId, projectId }
+            );
+          }
+        }
+
+        // Validate explicit sourceAudioHash if provided by caller
+        if (input.sourceAudioHash && input.sourceAudioHash !== transcription.sourceAudioHash) {
+          throw new ValidationError(
+            "Provided sourceAudioHash does not match referenced transcription sourceAudioHash",
+            { provided: input.sourceAudioHash, expected: transcription.sourceAudioHash }
+          );
+        }
+
+        // Validate explicit script if provided by caller
+        if (input.script && input.script !== transcription.canonicalText) {
+          throw new ValidationError(
+            "Provided script does not match referenced transcription canonicalText",
+            { providedLength: input.script.length, expectedLength: transcription.canonicalText.length }
+          );
+        }
+
+        // Derive trusted canonical values from referenced transcription
+        script = transcription.canonicalText;
+        sourceAudioHash = transcription.sourceAudioHash;
+      }
+
+      // 3. Validate script content
       if (!script || script.trim().length === 0) {
         throw new ValidationError("Script cannot be empty or only whitespace");
       }
@@ -86,7 +178,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         );
       }
 
-      // 3. Resolve and validate Brand / Product context
+      // 4. Resolve and validate Brand / Product context
       let brandContext: BrandContextForDirector | undefined;
       let productContext: ProductContextForDirector | undefined;
 
@@ -126,16 +218,16 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         };
       }
 
-      // 4. Compute script SHA-256 hash
+      // 5. Compute script SHA-256 hash
       const scriptHash = createHash("sha256").update(script, "utf8").digest("hex");
 
-      // 5. Deterministically unitize script
+      // 6. Deterministically unitize script
       const scriptUnits = unitizeScript(script);
       if (scriptUnits.length === 0) {
         throw new ValidationError("Failed to produce script units from input");
       }
 
-      // 6. Assert AI Provider configuration
+      // 7. Assert AI Provider configuration
       if (!directorAiProvider.isConfigured()) {
         throw new ProviderError(
           directorAiProvider.id,
@@ -147,7 +239,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
       // Create request-scoped Gemini transport budget shared across analyze + repair
       const budget = createDirectorExecutionBudget();
 
-      // 7. Initial AI generation
+      // 8. Initial AI generation
       const rawOutput = await directorAiProvider.analyze({
         scriptUnits,
         brandContext,
@@ -155,13 +247,12 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         budget,
       });
 
-      // 8. Validate 10 coverage invariants + cross-field rules
+      // 9. Validate 10 coverage invariants + cross-field rules
       let validation = validateAndReconstructPlan(rawOutput, scriptUnits, script);
       let finalRawOutput = rawOutput;
 
-      // 9. Single bounded repair attempt if invalid
+      // 10. Single bounded repair attempt if invalid
       if (!validation.success || !validation.scenes) {
-        // If the transport budget was already exhausted during analysis attempts, fail safely
         if (!budget.hasRemainingBudget()) {
           throw new ProviderError(
             directorAiProvider.id,
@@ -211,7 +302,7 @@ export function createDirectorService(options: DirectorServiceOptions): Director
       const validatedScenes: DirectorScene[] = validation.scenes;
       const actualModel = finalRawOutput.model || directorAiProvider.modelName;
 
-      // 10. Atomically replace DirectorPlan and DirectorScenes in database
+      // 11. Atomically replace DirectorPlan and DirectorScenes in database
       const savedPlan = await directorPlanRepository.replacePlan(
         projectId,
         {
@@ -228,6 +319,9 @@ export function createDirectorService(options: DirectorServiceOptions): Director
           creativeDirection: finalRawOutput.creativeDirection,
           brandId: input.brandId ?? null,
           productId: input.productId ?? null,
+          sourceType,
+          sourceTranscriptionId,
+          sourceAudioHash,
         },
         validatedScenes.map((s) => ({
           order: s.order,
@@ -262,7 +356,10 @@ export function createDirectorService(options: DirectorServiceOptions): Director
         latencyMs,
       });
 
-      return savedPlan;
+      return {
+        ...savedPlan,
+        isCurrent: true,
+      };
     },
   };
 }

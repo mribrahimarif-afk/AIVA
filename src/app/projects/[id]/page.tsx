@@ -1,11 +1,20 @@
 import { notFound } from "next/navigation";
-import { services, azureVoiceProvider, elevenLabsVoiceProvider, voiceProvider } from "@/services/container";
+import {
+  services,
+  azureVoiceProvider,
+  elevenLabsVoiceProvider,
+  voiceProvider,
+  geminiTranscribeProvider,
+  azureTranscribeProvider,
+  elevenLabsTranscribeProvider,
+} from "@/services/container";
 import { NotFoundError } from "@/domain/errors";
 import { Card } from "@/components/ui/card";
 import { ProjectStatusBadge } from "@/components/projects/status-badge";
 import { PipelineVisualization } from "@/components/projects/pipeline-visualization";
 import { DirectorWorkspace } from "@/components/director/director-workspace";
 import { VoiceWorkspace } from "@/components/voice/voice-workspace";
+import { AudioFirstWorkspace } from "@/components/audio-first/audio-first-workspace";
 import { VOICE_PROFILES } from "@/domain/voice";
 
 export const dynamic = "force-dynamic";
@@ -26,16 +35,24 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
     notFound();
   }
 
-  const [plan, brands, voiceTrack, elevenLabsVoices] = await Promise.all([
-    services.director.getPlan(id),
-    services.brand.listBrands(),
-    services.voice.getVoiceTrack(id).catch(() => null),
-    elevenLabsVoiceProvider.listVoices().catch(() => []),
-  ]);
+  const [plan, brands, voiceTrack, elevenLabsVoices, audioSources, activeTranscription] =
+    await Promise.all([
+      services.director.getPlan(id),
+      services.brand.listBrands(),
+      services.voice.getVoiceTrack(id).catch(() => null),
+      elevenLabsVoiceProvider.listVoices().catch(() => []),
+      services.transcription.getAudioSources(id).catch(() => []),
+      services.transcription.getActiveTranscription(id).catch(() => null),
+    ]);
 
   const isAiConfigured = services.director.isAiConfigured();
   const isAzureConfigured = azureVoiceProvider.isConfigured();
   const isElevenLabsConfigured = elevenLabsVoiceProvider.isConfigured();
+
+  const isGeminiTranscribeConfigured = geminiTranscribeProvider.isConfigured();
+  const isAzureTranscribeConfigured = azureTranscribeProvider.isConfigured();
+  const isElevenLabsSttEnabled = elevenLabsTranscribeProvider.isEnabled();
+  const isElevenLabsSttConfigured = elevenLabsTranscribeProvider.isConfigured();
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -54,6 +71,18 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         <PipelineVisualization status={project.status} />
       </Card>
 
+      {/* Audio-First (Flow B) Workspace */}
+      <AudioFirstWorkspace
+        projectId={id}
+        initialAudioSource={audioSources[0] ?? null}
+        initialTranscription={activeTranscription}
+        geminiConfigured={isGeminiTranscribeConfigured}
+        azureConfigured={isAzureTranscribeConfigured}
+        elevenLabsSttEnabled={isElevenLabsSttEnabled}
+        elevenLabsSttConfigured={isElevenLabsSttConfigured}
+        brands={brands}
+      />
+
       {/* AIVA Director Workspace */}
       <DirectorWorkspace
         project={project}
@@ -63,21 +92,26 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
       />
 
       {/* AIVA Voice Workspace */}
-      <VoiceWorkspace
-        projectId={id}
-        hasDirectorPlan={Boolean(plan)}
-        directorScriptHash={plan?.scriptHash}
-        initialVoiceTrack={voiceTrack}
-        isConfigured={isAzureConfigured}
-        azureConfigured={isAzureConfigured}
-        elevenLabsConfigured={isElevenLabsConfigured}
-        defaultVoice={voiceProvider.defaultVoice}
-        defaultAzureVoice={azureVoiceProvider.defaultVoice}
-        defaultElevenLabsVoice={elevenLabsVoiceProvider.defaultVoice}
-        supportedVoices={Object.values(VOICE_PROFILES)}
-        azureVoices={Object.values(VOICE_PROFILES)}
-        elevenLabsVoices={elevenLabsVoices}
-      />
+      {(() => {
+        const isPlanUsable = plan ? (plan.sourceType === "AUDIO_TRANSCRIPT" ? Boolean(plan.isCurrent) : true) : false;
+        return (
+          <VoiceWorkspace
+            projectId={id}
+            hasDirectorPlan={isPlanUsable}
+            directorScriptHash={isPlanUsable ? plan?.scriptHash : undefined}
+            initialVoiceTrack={voiceTrack}
+            isConfigured={isAzureConfigured}
+            azureConfigured={isAzureConfigured}
+            elevenLabsConfigured={isElevenLabsConfigured}
+            defaultVoice={voiceProvider.defaultVoice}
+            defaultAzureVoice={azureVoiceProvider.defaultVoice}
+            defaultElevenLabsVoice={elevenLabsVoiceProvider.defaultVoice}
+            supportedVoices={Object.values(VOICE_PROFILES)}
+            azureVoices={Object.values(VOICE_PROFILES)}
+            elevenLabsVoices={elevenLabsVoices}
+          />
+        );
+      })()}
     </div>
   );
 }

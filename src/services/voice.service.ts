@@ -13,7 +13,12 @@ import {
   VoiceTrackWithBoundariesDto,
   validateVoiceSynthesis,
 } from "@/domain/voice";
-import { ProjectRepository, DirectorPlanRepository } from "@/repositories";
+import {
+  ProjectRepository,
+  DirectorPlanRepository,
+  AudioSourceRepository,
+  TranscriptionRepository,
+} from "@/repositories";
 import { VoiceTrackRepository } from "@/repositories/voice-track.repository";
 import { toVoiceTrackDto, toVoiceTrackWithBoundariesDto } from "@/repositories/mappers";
 import { VoiceProvider } from "@/providers/voice";
@@ -23,6 +28,8 @@ export interface VoiceServiceDependencies {
   projectRepository: ProjectRepository;
   directorPlanRepository: DirectorPlanRepository;
   voiceTrackRepository: VoiceTrackRepository;
+  audioSourceRepository?: AudioSourceRepository;
+  transcriptionRepository?: TranscriptionRepository;
   voiceProvider?: VoiceProvider; // Legacy fallback
   voiceProviders?: Record<string, VoiceProvider>;
   voiceStorageService: VoiceStorageService;
@@ -68,6 +75,37 @@ export class VoiceService {
     }
 
     throw new DomainError("INVALID_PROVIDER", `Unsupported voice provider: ${providerId}`);
+  }
+
+  private async assertDirectorPlanUsable(projectId: string, directorPlan: { sourceType?: string; sourceTranscriptionId?: string | null; id: string }): Promise<void> {
+    if (directorPlan.sourceType === "AUDIO_TRANSCRIPT") {
+      if (!directorPlan.sourceTranscriptionId) {
+        throw new DomainError(
+          "STALE_DIRECTOR_PLAN",
+          "Audio-First Director plan lacks source transcription reference and cannot be used for Voice generation."
+        );
+      }
+
+      if (this.deps.transcriptionRepository) {
+        const transcription = await this.deps.transcriptionRepository.findById(directorPlan.sourceTranscriptionId);
+        if (!transcription || transcription.projectId !== projectId) {
+          throw new DomainError(
+            "STALE_DIRECTOR_PLAN",
+            "Audio-First Director plan references a non-existent or foreign transcription and cannot be used for Voice generation."
+          );
+        }
+
+        if (this.deps.audioSourceRepository) {
+          const audioSource = await this.deps.audioSourceRepository.findById(transcription.audioSourceId);
+          if (!audioSource || audioSource.activeTranscriptionId !== directorPlan.sourceTranscriptionId) {
+            throw new DomainError(
+              "STALE_DIRECTOR_PLAN",
+              "Audio-First Director plan is based on a stale transcription. Re-run Director with the active transcription first."
+            );
+          }
+        }
+      }
+    }
   }
 
   async getVoiceTrack(projectId: string): Promise<VoiceTrackDto | null> {
@@ -118,6 +156,9 @@ export class VoiceService {
         "A valid Director plan is required before generating voice narration. Analyze the script first."
       );
     }
+
+    // 2b. Assert that Audio-First Director plan is current and usable (not stale)
+    await this.assertDirectorPlanUsable(projectId, directorPlan);
 
     // 3. Exact script fidelity & hash verification before calling provider
     const calculatedHash = crypto.createHash("sha256").update(directorPlan.originalScript).digest("hex").toLowerCase();

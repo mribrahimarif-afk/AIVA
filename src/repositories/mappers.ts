@@ -245,6 +245,9 @@ export function toDirectorPlan(
     creativeDirection: row.creativeDirection,
     brandId: row.brandId ?? null,
     productId: row.productId ?? null,
+    sourceType: (row.sourceType as "SCRIPT" | "AUDIO_TRANSCRIPT") || "SCRIPT",
+    sourceTranscriptionId: row.sourceTranscriptionId ?? null,
+    sourceAudioHash: row.sourceAudioHash ?? null,
     generatedAt: row.generatedAt,
     scenes: row.scenes ? row.scenes.map(toDirectorScene) : [],
   };

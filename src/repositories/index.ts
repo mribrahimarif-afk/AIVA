@@ -5,5 +5,7 @@ export * from "./content-blob.repository";
 export * from "./scene.repository";
 export * from "./director-plan.repository";
 export * from "./voice-track.repository";
+export * from "./audio-source.repository";
+export * from "./transcription.repository";
 export * from "./asset.repository";
 export * from "./mappers";
