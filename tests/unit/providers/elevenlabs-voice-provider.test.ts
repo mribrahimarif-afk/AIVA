@@ -4,6 +4,7 @@ import {
   ELEVENLABS_MAX_CHARS_V3,
 } from "@/providers/voice/elevenlabs-voice.provider";
 import { ProviderError } from "@/domain/errors";
+import { logger } from "@/infrastructure/logging/logger";
 
 describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
   const sampleScript = "Hello world from AIVA ElevenLabs";
@@ -32,7 +33,7 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
   it("rejects synthesis when unconfigured with VOICE_UNCONFIGURED", async () => {
     const provider = new ElevenLabsVoiceProvider({ apiKey: "" });
     try {
-      await provider.synthesize({ text: sampleScript });
+      await provider.synthesize({ text: sampleScript, voiceName: "test_voice" });
       expect.unreachable();
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(ProviderError);
@@ -40,18 +41,38 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
     }
   });
 
+  it("rejects synthesis before making network calls when voiceName is missing and no default voice configured", async () => {
+    const fetchFn = vi.fn();
+    const provider = new ElevenLabsVoiceProvider({
+      apiKey: "el_key_123",
+      defaultVoiceId: "",
+      fetchFn: fetchFn as never,
+    });
+
+    try {
+      await provider.synthesize({ text: sampleScript, voiceName: "" });
+      expect.unreachable();
+    } catch (err: unknown) {
+      expect(err).toBeInstanceOf(ProviderError);
+      expect((err as ProviderError).details?.code).toBe("REQUEST_FAILED");
+    }
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it("enforces 5,000 character preflight limit for eleven_v3 without calling network", async () => {
     const fetchFn = vi.fn();
     const provider = new ElevenLabsVoiceProvider({
       apiKey: "el_test_key_123",
       modelId: "eleven_v3",
+      defaultVoiceId: "test_voice_1",
       fetchFn: fetchFn as never,
     });
 
     const oversizedScript = "A".repeat(ELEVENLABS_MAX_CHARS_V3 + 1);
 
     try {
-      await provider.synthesize({ text: oversizedScript });
+      await provider.synthesize({ text: oversizedScript, voiceName: "test_voice_1" });
       expect.unreachable();
     } catch (err: unknown) {
       expect(err).toBeInstanceOf(ProviderError);
@@ -129,13 +150,168 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
 
     const provider = new ElevenLabsVoiceProvider({
       apiKey: "el_key_123",
+      defaultVoiceId: "voice_1",
       fetchFn: fetchFn as never,
     });
 
-    await expect(provider.synthesize({ text: sampleScript })).rejects.toThrow(ProviderError);
+    await expect(provider.synthesize({ text: sampleScript, voiceName: "voice_1" })).rejects.toThrow(ProviderError);
 
     // Hard guarantee: exactly 1 call, zero auto-retries
     expect(callCount).toBe(1);
+  });
+
+  describe("Strict Base64 Audio Validation Tests", () => {
+    it("accepts strictly valid Base64 and produces valid canonical WAV", async () => {
+      const validPcm = Buffer.from([0x00, 0x10, 0x00, 0x20]);
+      const validBase64 = validPcm.toString("base64");
+
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          audio_base64: validBase64,
+          alignment: createMockAlignment(sampleScript),
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: "el_key",
+        defaultVoiceId: "v1",
+        fetchFn: fetchFn as never,
+      });
+
+      const result = await provider.synthesize({ text: sampleScript, voiceName: "v1" });
+      expect(result.audioData).toBeInstanceOf(Buffer);
+      expect(result.audioData.length).toBe(44 + 4);
+    });
+
+    it("rejects invalid Base64 characters (e.g. not-valid-base64!!!) with REQUEST_FAILED", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          audio_base64: "not-valid-base64!!!",
+          alignment: createMockAlignment(sampleScript),
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: "el_key",
+        defaultVoiceId: "v1",
+        fetchFn: fetchFn as never,
+      });
+
+      try {
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(ProviderError);
+        expect((err as ProviderError).details?.code).toBe("REQUEST_FAILED");
+      }
+    });
+
+    it("rejects invalid padding (e.g. AAAA=) with REQUEST_FAILED", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          audio_base64: "AAAA=",
+          alignment: createMockAlignment(sampleScript),
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: "el_key",
+        defaultVoiceId: "v1",
+        fetchFn: fetchFn as never,
+      });
+
+      try {
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(ProviderError);
+        expect((err as ProviderError).details?.code).toBe("REQUEST_FAILED");
+      }
+    });
+
+    it("rejects invalid length not multiple of 4 (e.g. AAA) with REQUEST_FAILED", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          audio_base64: "AAA",
+          alignment: createMockAlignment(sampleScript),
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: "el_key",
+        defaultVoiceId: "v1",
+        fetchFn: fetchFn as never,
+      });
+
+      try {
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(ProviderError);
+        expect((err as ProviderError).details?.code).toBe("REQUEST_FAILED");
+      }
+    });
+
+    it("rejects empty audio string with EMPTY_AUDIO", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          audio_base64: "   ",
+          alignment: createMockAlignment(sampleScript),
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: "el_key",
+        defaultVoiceId: "v1",
+        fetchFn: fetchFn as never,
+      });
+
+      try {
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(ProviderError);
+        expect((err as ProviderError).details?.code).toBe("EMPTY_AUDIO");
+      }
+    });
+
+    it("rejects odd-byte decoded PCM with REQUEST_FAILED", async () => {
+      // 3 bytes decoded PCM is invalid for 16-bit audio
+      const threeByteBase64 = Buffer.from([0x01, 0x02, 0x03]).toString("base64");
+
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          audio_base64: threeByteBase64,
+          alignment: createMockAlignment(sampleScript),
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: "el_key",
+        defaultVoiceId: "v1",
+        fetchFn: fetchFn as never,
+      });
+
+      try {
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
+        expect.unreachable();
+      } catch (err: unknown) {
+        expect(err).toBeInstanceOf(ProviderError);
+        expect((err as ProviderError).details?.code).toBe("REQUEST_FAILED");
+      }
+    });
   });
 
   describe("HTTP Error Normalization", () => {
@@ -146,9 +322,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
         json: async () => ({ detail: "Invalid API key" }),
       });
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "bad_key", fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "bad_key", defaultVoiceId: "v1", fetchFn: fetchFn as never });
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -163,9 +339,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
         json: async () => ({ detail: "Forbidden access" }),
       });
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "restricted_key", fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "restricted_key", defaultVoiceId: "v1", fetchFn: fetchFn as never });
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -180,9 +356,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
         json: async () => ({ detail: "Rate limit exceeded" }),
       });
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", defaultVoiceId: "v1", fetchFn: fetchFn as never });
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -198,9 +374,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
           json: async () => ({ detail: "Unprocessable Entity" }),
         });
 
-        const provider = new ElevenLabsVoiceProvider({ apiKey: "key", fetchFn: fetchFn as never });
+        const provider = new ElevenLabsVoiceProvider({ apiKey: "key", defaultVoiceId: "v1", fetchFn: fetchFn as never });
         try {
-          await provider.synthesize({ text: sampleScript });
+          await provider.synthesize({ text: sampleScript, voiceName: "v1" });
           expect.unreachable();
         } catch (err: unknown) {
           expect(err).toBeInstanceOf(ProviderError);
@@ -216,9 +392,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
         json: async () => ({ detail: "Internal Server Error" }),
       });
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", defaultVoiceId: "v1", fetchFn: fetchFn as never });
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -229,9 +405,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
     it("normalizes network connection failure to NETWORK_FAILURE", async () => {
       const fetchFn = vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.1:443"));
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", defaultVoiceId: "v1", fetchFn: fetchFn as never });
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -244,9 +420,9 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       abortError.name = "AbortError";
       const fetchFn = vi.fn().mockRejectedValue(abortError);
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", timeoutMs: 5000, fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "key", defaultVoiceId: "v1", timeoutMs: 5000, fetchFn: fetchFn as never });
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -262,10 +438,10 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
         json: async () => ({ detail: `Key ${canaryKey} was invalid` }),
       });
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: canaryKey, fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: canaryKey, defaultVoiceId: "v1", fetchFn: fetchFn as never });
 
       try {
-        await provider.synthesize({ text: sampleScript });
+        await provider.synthesize({ text: sampleScript, voiceName: "v1" });
         expect.unreachable();
       } catch (err: unknown) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -398,6 +574,86 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices).toHaveLength(5);
     });
 
+    it("detects immediate pagination token repetition (A -> A) and terminates loop", async () => {
+      let callCount = 0;
+      const fetchFn = vi.fn().mockImplementation(async () => {
+        callCount++;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            voices: [{ voice_id: `v_cycle_imm_${callCount}`, name: `Voice ${callCount}` }],
+            has_more: true,
+            next_page_token: "token_repeat_A",
+          }),
+        } as Response;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      // Page 1 yields token_repeat_A, Page 2 receives token_repeat_A and terminates
+      expect(callCount).toBe(2);
+      expect(voices).toHaveLength(2);
+    });
+
+    it("detects multi-token pagination cycle (A -> B -> A) and terminates before repeating request", async () => {
+      const requestedTokens: Array<string | null> = [];
+      const fetchFn = vi.fn().mockImplementation(async (url: string) => {
+        const parsedUrl = new URL(url);
+        const token = parsedUrl.searchParams.get("next_page_token");
+        requestedTokens.push(token);
+
+        if (!token) {
+          // Page 1: returns token A
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_cycle_1", name: "Voice 1" }],
+              has_more: true,
+              next_page_token: "token_A",
+            }),
+          } as Response;
+        }
+
+        if (token === "token_A") {
+          // Page 2: returns token B
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_cycle_2", name: "Voice 2" }],
+              has_more: true,
+              next_page_token: "token_B",
+            }),
+          } as Response;
+        }
+
+        if (token === "token_B") {
+          // Page 3: cycles back to token A
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              voices: [{ voice_id: "v_cycle_3", name: "Voice 3" }],
+              has_more: true,
+              next_page_token: "token_A", // Cycle back to A!
+            }),
+          } as Response;
+        }
+
+        return { ok: false, status: 500 } as Response;
+      });
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
+      const voices = await provider.listVoices();
+
+      // Page 1 (null), Page 2 (token_A), Page 3 (token_B). Cycle detected at end of Page 3 before requesting token_A again!
+      expect(requestedTokens).toEqual([null, "token_A", "token_B"]);
+      expect(voices).toHaveLength(3);
+    });
+
     it("deduplicates voices by stable voice_id across paginated responses", async () => {
       const fetchFn = vi.fn().mockImplementation(async (url: string) => {
         const parsedUrl = new URL(url);
@@ -440,13 +696,13 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices[0]?.displayName).toBe("Original 1"); // Preserves first occurrence
     });
 
-    it("returns empty array on 401 unauthorized without fabricating Rachel or Adam", async () => {
+    it("returns empty array on actual HTTP 429 rate limit without fabricating voices", async () => {
       const fetchFn = vi.fn().mockResolvedValue({
         ok: false,
-        status: 401,
+        status: 429,
       } as Response);
 
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "invalid_key", fetchFn: fetchFn as never });
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
 
       expect(voices).toEqual([]);
@@ -454,10 +710,10 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices.some((v) => v.voiceId === "pNInz6obpgDQGcFmaJgB")).toBe(false);
     });
 
-    it("returns empty array on 403 forbidden without fabricating fallback catalogue", async () => {
+    it("returns empty array on actual HTTP 5xx upstream unavailable", async () => {
       const fetchFn = vi.fn().mockResolvedValue({
         ok: false,
-        status: 403,
+        status: 502,
       } as Response);
 
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
@@ -466,11 +722,8 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices).toEqual([]);
     });
 
-    it("returns empty array on 429 rate limit without fabricating fallback catalogue", async () => {
-      const fetchFn = vi.fn().mockResolvedValue({
-        ok: false,
-        status: 402,
-      } as Response);
+    it("returns empty array on network rejection (TypeError: fetch failed)", async () => {
+      const fetchFn = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
 
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
@@ -478,21 +731,24 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices).toEqual([]);
     });
 
-    it("returns empty array on 5xx, network failure, or timeout without fabricating voices", async () => {
-      const fetchFn = vi.fn().mockRejectedValue(new Error("Network connection reset"));
+    it("returns empty array on timeout / AbortError", async () => {
+      const abortError = new Error("The operation was aborted");
+      abortError.name = "AbortError";
+      const fetchFn = vi.fn().mockRejectedValue(abortError);
 
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
 
       expect(voices).toEqual([]);
-      expect(voices).toHaveLength(0);
     });
 
     it("returns empty array on invalid JSON or malformed discovery response", async () => {
       const fetchFn = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
-        json: async () => ({ voices: "not an array" }),
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON at position 0");
+        },
       } as unknown as Response);
 
       const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
@@ -501,13 +757,22 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(voices).toEqual([]);
     });
 
-    it("ensures unconfigured provider returns empty array without hardcoded fallback IDs", async () => {
-      const provider = new ElevenLabsVoiceProvider({ apiKey: "" });
+    it("returns empty array on malformed pagination token (e.g. empty or non-string)", async () => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          voices: [{ voice_id: "v_1", name: "Voice 1" }],
+          has_more: true,
+          next_page_token: "   ", // whitespace token
+        }),
+      } as Response);
+
+      const provider = new ElevenLabsVoiceProvider({ apiKey: "el_key", fetchFn: fetchFn as never });
       const voices = await provider.listVoices();
 
-      expect(voices).toEqual([]);
-      expect(voices.some((v) => v.voiceId === "21m00Tcm4TlvDq8ikWAM")).toBe(false);
-      expect(voices.some((v) => v.voiceId === "pNInz6obpgDQGcFmaJgB")).toBe(false);
+      expect(voices).toHaveLength(1);
+      expect(voices[0]?.voiceId).toBe("v_1");
     });
 
     it("proves discovery failure does not invoke synthesis or make synthesis requests", async () => {
@@ -524,7 +789,6 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
       expect(fetchCalls).toHaveLength(1);
       expect(fetchCalls[0]?.url).toContain("/v2/voices");
       expect(fetchCalls[0]?.method).toBe("GET");
-      // Proves NO text-to-speech / with-timestamps synthesis call was triggered!
       expect(fetchCalls.some((c) => c.url.includes("text-to-speech"))).toBe(false);
     });
 
@@ -542,6 +806,42 @@ describe("ElevenLabsVoiceProvider Unit & Transport Tests", () => {
 
       expect(azureVoices.length).toBeGreaterThan(0);
       expect(azureVoices.some((v) => v.provider === "AZURE")).toBe(true);
+    });
+
+    it("LOGGER CANARY TEST: proves sensitive canaries never appear in discovery logs or outputs", async () => {
+      const warnSpy = vi.spyOn(logger, "warn");
+      const errorSpy = vi.spyOn(logger, "error");
+
+      const SECRET_API_KEY_CANARY = "SECRET_API_KEY_CANARY_777";
+      const ACCOUNT_ID_CANARY = "ACCOUNT_ID_CANARY_888";
+      const RAW_PROVIDER_BODY_CANARY = "RAW_PROVIDER_BODY_CANARY_999";
+
+      const hostileError = new Error(
+        `Hostile upstream dump: key=${SECRET_API_KEY_CANARY}, account=${ACCOUNT_ID_CANARY}, body=${RAW_PROVIDER_BODY_CANARY}`
+      );
+
+      const fetchFn = vi.fn().mockRejectedValue(hostileError);
+      const provider = new ElevenLabsVoiceProvider({
+        apiKey: SECRET_API_KEY_CANARY,
+        fetchFn: fetchFn as never,
+      });
+
+      const voices = await provider.listVoices();
+      expect(voices).toEqual([]);
+
+      // Verify logger calls
+      const allLogPayloads = [...warnSpy.mock.calls, ...errorSpy.mock.calls].map((args) =>
+        JSON.stringify(args)
+      );
+
+      for (const logStr of allLogPayloads) {
+        expect(logStr).not.toContain(SECRET_API_KEY_CANARY);
+        expect(logStr).not.toContain(ACCOUNT_ID_CANARY);
+        expect(logStr).not.toContain(RAW_PROVIDER_BODY_CANARY);
+      }
+
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
     });
   });
 });

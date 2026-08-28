@@ -155,8 +155,13 @@ export class VoiceService {
       voiceName = requestedVoice;
       locale = VOICE_PROFILES[requestedVoice as SupportedVoice]?.locale ?? "ur-PK";
     } else {
-      // ElevenLabs
-      voiceName = input.voiceName && input.voiceName.trim().length > 0 ? input.voiceName.trim() : providerInstance.defaultVoice;
+      // ElevenLabs: require explicit voiceName or configured default
+      const requestedVoice = input.voiceName?.trim();
+      const resolvedVoice = requestedVoice || providerInstance.defaultVoice?.trim();
+      if (!resolvedVoice) {
+        throw new DomainError("INVALID_VOICE", "An explicit ElevenLabs voice must be selected");
+      }
+      voiceName = resolvedVoice;
       locale = "multilingual";
     }
 

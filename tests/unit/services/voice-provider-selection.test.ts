@@ -118,23 +118,24 @@ describe("Voice Provider Selection & Credit-Safe Reuse Tests", () => {
     elevenLabsSynthesizeCalled = 0;
 
     fakeAzureProvider = new FakeVoiceProvider({
+      id: "azure-speech",
       isConfigured: true,
+      defaultVoice: "ur-PK-AsadNeural",
+      defaultModel: "azure-neural",
       onSynthesize: () => {
         azureSynthesizeCalled++;
       },
     });
-    // Set custom id and defaultModel
-    Object.defineProperty(fakeAzureProvider, "id", { value: "azure-speech" });
-    Object.defineProperty(fakeAzureProvider, "defaultModel", { value: "azure-neural" });
 
     fakeElevenLabsProvider = new FakeVoiceProvider({
+      id: "elevenlabs",
       isConfigured: true,
+      defaultVoice: "",
+      defaultModel: "eleven_v3",
       onSynthesize: () => {
         elevenLabsSynthesizeCalled++;
       },
     });
-    Object.defineProperty(fakeElevenLabsProvider, "id", { value: "elevenlabs" });
-    Object.defineProperty(fakeElevenLabsProvider, "defaultModel", { value: "eleven_v3" });
 
     voiceService = new VoiceService({
       projectRepository: mockProjectRepo as ProjectRepository,
@@ -176,14 +177,40 @@ describe("Voice Provider Selection & Credit-Safe Reuse Tests", () => {
   it("calls only ElevenLabs when provider is explicitly ELEVENLABS", async () => {
     const track = await voiceService.generateVoice(projectId, {
       provider: "ELEVENLABS",
-      voiceName: "21m00Tcm4TlvDq8ikWAM",
+      voiceName: "voice_el_sample_1",
     });
 
     expect(azureSynthesizeCalled).toBe(0);
     expect(elevenLabsSynthesizeCalled).toBe(1);
     expect(track.provider).toBe("elevenlabs");
-    expect(track.voiceName).toBe("21m00Tcm4TlvDq8ikWAM");
+    expect(track.voiceName).toBe("voice_el_sample_1");
     expect(track.model).toBe("eleven_v3");
+  });
+
+  it("fails closed before synthesis when ElevenLabs voice is missing and unconfigured", async () => {
+    const customElevenLabs = new FakeVoiceProvider({
+      isConfigured: true,
+      defaultVoice: "",
+    });
+    Object.defineProperty(customElevenLabs, "id", { value: "elevenlabs" });
+
+    const testService = new VoiceService({
+      projectRepository: mockProjectRepo as ProjectRepository,
+      directorPlanRepository: mockDirectorPlanRepo as DirectorPlanRepository,
+      voiceTrackRepository: mockVoiceTrackRepo as VoiceTrackRepository,
+      voiceProviders: {
+        "azure-speech": fakeAzureProvider,
+        elevenlabs: customElevenLabs,
+      },
+      voiceStorageService: mockStorageService as VoiceStorageService,
+    });
+
+    await expect(
+      testService.generateVoice(projectId, { provider: "ELEVENLABS" })
+    ).rejects.toThrow(DomainError);
+
+    expect(azureSynthesizeCalled).toBe(0);
+    expect(elevenLabsSynthesizeCalled).toBe(0);
   });
 
   it("proves zero automatic cross-provider fallback when Azure fails", async () => {
@@ -231,7 +258,7 @@ describe("Voice Provider Selection & Credit-Safe Reuse Tests", () => {
     });
 
     await expect(
-      testService.generateVoice(projectId, { provider: "ELEVENLABS", voiceName: "21m00Tcm4TlvDq8ikWAM" })
+      testService.generateVoice(projectId, { provider: "ELEVENLABS", voiceName: "voice_el_sample_1" })
     ).rejects.toThrow(ProviderError);
 
     // Azure must NOT have been called

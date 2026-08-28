@@ -9,6 +9,60 @@ export const CANONICAL_BLOCK_ALIGN = CANONICAL_NUM_CHANNELS * (CANONICAL_BITS_PE
 export const WAV_HEADER_SIZE = 44;
 
 /**
+ * Strictly validates and decodes a base64 encoded audio string.
+ *
+ * Rules:
+ * 1. Must be a non-empty string.
+ * 2. Standard Base64 characters only ([A-Za-z0-9+/]) with valid padding (up to 2 '=').
+ * 3. Length must be a positive multiple of 4.
+ * 4. Must match canonical base64 re-encoding (Buffer.from(trimmed, "base64").toString("base64") === trimmed).
+ * 5. Decoded buffer must be non-empty.
+ * 6. Decoded buffer length must be a multiple of 2 for 16-bit PCM.
+ *
+ * Fails closed without silent sanitization.
+ */
+export function validateAndDecodeBase64Audio(rawBase64: unknown): Buffer {
+  if (typeof rawBase64 !== "string") {
+    throw new DomainError("REQUEST_FAILED", "Audio base64 data must be a string");
+  }
+
+  const trimmed = rawBase64.trim();
+  if (trimmed.length === 0) {
+    throw new DomainError("EMPTY_AUDIO", "Audio base64 data is empty");
+  }
+
+  if (trimmed.length % 4 !== 0) {
+    throw new DomainError("REQUEST_FAILED", "Audio base64 data length is not a multiple of 4");
+  }
+
+  // Standard Base64 regex (rejects URL-safe, illegal characters, and invalid padding positions)
+  const base64Regex = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$/;
+  if (!base64Regex.test(trimmed)) {
+    throw new DomainError("REQUEST_FAILED", "Audio base64 data contains invalid characters or malformed padding");
+  }
+
+  const pcmBuffer = Buffer.from(trimmed, "base64");
+
+  if (pcmBuffer.length === 0) {
+    throw new DomainError("EMPTY_AUDIO", "Decoded audio buffer is empty");
+  }
+
+  // Canonical round-trip validation: prevents non-canonical representations
+  if (pcmBuffer.toString("base64") !== trimmed) {
+    throw new DomainError("REQUEST_FAILED", "Audio base64 data is not in canonical representation");
+  }
+
+  if (pcmBuffer.length % 2 !== 0) {
+    throw new DomainError(
+      "REQUEST_FAILED",
+      `Decoded PCM buffer length (${pcmBuffer.length} bytes) is not a multiple of 2 for 16-bit audio`
+    );
+  }
+
+  return pcmBuffer;
+}
+
+/**
  * Wraps raw signed 16-bit little-endian 24kHz mono PCM into a canonical 44-byte RIFF WAV container.
  */
 export function pcm24kToWav(pcmBuffer: Buffer): Buffer {

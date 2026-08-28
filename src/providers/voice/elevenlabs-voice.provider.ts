@@ -1,12 +1,16 @@
 import { logger } from "@/infrastructure/logging/logger";
 import { getEnv } from "@/infrastructure/config/env";
-import { ProviderError } from "@/domain/errors";
+import { ProviderError, DomainError } from "@/domain/errors";
 import {
   VoiceProfile,
   VoiceSynthesisResult,
   VOICE_OUTPUT_FORMAT,
 } from "@/domain/voice/voice.types";
-import { pcm24kToWav, computePcm24kDurationTicks } from "@/domain/voice/pcm-to-wav";
+import {
+  pcm24kToWav,
+  computePcm24kDurationTicks,
+  validateAndDecodeBase64Audio,
+} from "@/domain/voice/pcm-to-wav";
 import {
   convertElevenLabsAlignmentToBoundaries,
   ElevenLabsAlignment,
@@ -14,7 +18,6 @@ import {
 import { VoiceProvider, VoiceSynthesisOptions } from "./voice-provider.interface";
 
 export const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_v3";
-export const DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"; // Rachel (Multilingual)
 export const ELEVENLABS_MAX_CHARS_V3 = 5000;
 export const ELEVENLABS_DISCOVERY_MAX_PAGES = 5;
 export const ELEVENLABS_DISCOVERY_PAGE_SIZE = 100;
@@ -65,8 +68,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     const env = getEnv();
     this.apiKey = config?.apiKey ?? env.ELEVENLABS_API_KEY ?? "";
     this.defaultModel = config?.modelId ?? env.ELEVENLABS_MODEL_ID ?? DEFAULT_ELEVENLABS_MODEL_ID;
-    this.defaultVoice =
-      config?.defaultVoiceId ?? env.ELEVENLABS_DEFAULT_VOICE_ID ?? DEFAULT_ELEVENLABS_VOICE_ID;
+    this.defaultVoice = config?.defaultVoiceId ?? env.ELEVENLABS_DEFAULT_VOICE_ID ?? "";
 
     const rawTimeout = config?.timeoutMs !== undefined ? config.timeoutMs : env.ELEVENLABS_TIMEOUT_MS;
     this.timeoutMs = validateElevenLabsTimeoutMs(rawTimeout);
@@ -83,6 +85,7 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
     }
 
     const voiceMap = new Map<string, VoiceProfile>();
+    const seenTokens = new Set<string>();
 
     try {
       let pageToken: string | undefined = undefined;
@@ -90,6 +93,19 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
 
       while (pageCount < ELEVENLABS_DISCOVERY_MAX_PAGES) {
         pageCount++;
+
+        if (pageToken) {
+          if (seenTokens.has(pageToken)) {
+            logger.warn({
+              event: "elevenlabs.list_voices_failed",
+              provider: "ELEVENLABS",
+              operation: "voice_discovery",
+              category: "PAGINATION_CYCLE_DETECTED",
+            });
+            break;
+          }
+          seenTokens.add(pageToken);
+        }
 
         const url = new URL("https://api.elevenlabs.io/v2/voices");
         url.searchParams.set("page_size", String(ELEVENLABS_DISCOVERY_PAGE_SIZE));
@@ -109,14 +125,32 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
             },
             signal: controller.signal,
           });
+        } catch (err: unknown) {
+          const isTimeout = err instanceof Error && err.name === "AbortError";
+          logger.warn({
+            event: "elevenlabs.list_voices_failed",
+            provider: "ELEVENLABS",
+            operation: "voice_discovery",
+            category: isTimeout ? "TIMEOUT" : "NETWORK_FAILURE",
+          });
+          return [];
         } finally {
           clearTimeout(timer);
         }
 
         if (!response.ok) {
+          const status = response.status;
+          let category = "UNKNOWN_PROVIDER_FAILURE";
+          if (status === 401 || status === 403) category = "AUTH_FAILED";
+          else if (status === 429) category = "RATE_LIMITED";
+          else if (status >= 500) category = "UPSTREAM_UNAVAILABLE";
+
           logger.warn({
             event: "elevenlabs.list_voices_failed",
-            status: response.status,
+            provider: "ELEVENLABS",
+            operation: "voice_discovery",
+            category,
+            status,
             page: pageCount,
           });
           break;
@@ -126,11 +160,25 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
         try {
           rawData = await response.json();
         } catch {
+          logger.warn({
+            event: "elevenlabs.list_voices_failed",
+            provider: "ELEVENLABS",
+            operation: "voice_discovery",
+            category: "MALFORMED_RESPONSE",
+            page: pageCount,
+          });
           break;
         }
 
         const data = rawData as ElevenLabsV2VoicesResponse;
         if (!data || !Array.isArray(data.voices)) {
+          logger.warn({
+            event: "elevenlabs.list_voices_failed",
+            provider: "ELEVENLABS",
+            operation: "voice_discovery",
+            category: "MALFORMED_RESPONSE",
+            page: pageCount,
+          });
           break;
         }
 
@@ -167,12 +215,23 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
           !data.has_more ||
           !data.next_page_token ||
           typeof data.next_page_token !== "string" ||
-          data.next_page_token === pageToken
+          data.next_page_token.trim().length === 0
         ) {
           break;
         }
 
-        pageToken = data.next_page_token;
+        const nextTok = data.next_page_token.trim();
+        if (seenTokens.has(nextTok)) {
+          logger.warn({
+            event: "elevenlabs.list_voices_failed",
+            provider: "ELEVENLABS",
+            operation: "voice_discovery",
+            category: "PAGINATION_CYCLE_DETECTED",
+          });
+          break;
+        }
+
+        pageToken = nextTok;
       }
 
       if (voiceMap.size === 0) {
@@ -180,10 +239,12 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
       }
 
       return Array.from(voiceMap.values());
-    } catch (err: unknown) {
+    } catch {
       logger.warn({
-        event: "elevenlabs.list_voices_error",
-        error: err instanceof Error ? err.message : "Unknown error",
+        event: "elevenlabs.list_voices_failed",
+        provider: "ELEVENLABS",
+        operation: "voice_discovery",
+        category: "UNKNOWN_PROVIDER_FAILURE",
       });
       return [];
     }
@@ -196,12 +257,24 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
       });
     }
 
-    const { text, voiceName = this.defaultVoice, modelId = this.defaultModel } = options;
+    const { text, voiceName, modelId = this.defaultModel } = options;
 
     if (!text || text.trim().length === 0) {
       throw new ProviderError(this.id, "Cannot synthesize empty script", {
         code: "EMPTY_AUDIO",
       });
+    }
+
+    // Require confirmed explicit voice identity or configured default
+    const voiceId = (voiceName && voiceName.trim().length > 0 ? voiceName.trim() : this.defaultVoice).trim();
+    if (!voiceId) {
+      throw new ProviderError(
+        this.id,
+        "ElevenLabs voice ID is required. Please select a valid voice from the catalogue or configure ELEVENLABS_DEFAULT_VOICE_ID.",
+        {
+          code: "REQUEST_FAILED",
+        }
+      );
     }
 
     // Preflight character length validation for eleven_v3
@@ -217,7 +290,6 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
       );
     }
 
-    const voiceId = voiceName && voiceName.trim().length > 0 ? voiceName.trim() : this.defaultVoice;
     const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/with-timestamps?output_format=pcm_24000`;
 
     const controller = new AbortController();
@@ -306,32 +378,26 @@ export class ElevenLabsVoiceProvider implements VoiceProvider {
 
     const data = rawData as { audio_base64?: unknown; alignment?: ElevenLabsAlignment };
 
-    if (typeof data.audio_base64 !== "string" || data.audio_base64.trim().length === 0) {
-      throw new ProviderError(this.id, "ElevenLabs returned empty or missing audio data", {
-        code: "EMPTY_AUDIO",
-      });
-    }
-
+    // 1. Strictly validate and decode base64 audio data
     let pcmBuffer: Buffer;
     try {
-      pcmBuffer = Buffer.from(data.audio_base64, "base64");
-    } catch {
-      throw new ProviderError(this.id, "ElevenLabs audio data is not valid base64", {
+      pcmBuffer = validateAndDecodeBase64Audio(data.audio_base64);
+    } catch (err: unknown) {
+      if (err instanceof DomainError) {
+        throw new ProviderError(this.id, err.message, {
+          code: err.code === "EMPTY_AUDIO" ? "EMPTY_AUDIO" : "REQUEST_FAILED",
+        });
+      }
+      throw new ProviderError(this.id, "ElevenLabs audio data validation failed", {
         code: "REQUEST_FAILED",
       });
     }
 
-    if (pcmBuffer.length === 0) {
-      throw new ProviderError(this.id, "ElevenLabs produced empty audio buffer", {
-        code: "EMPTY_AUDIO",
-      });
-    }
-
-    // 1. Wrap raw 24kHz 16-bit mono PCM into canonical WAV container
+    // 2. Wrap raw 24kHz 16-bit mono PCM into canonical WAV container
     const wavBuffer = pcm24kToWav(pcmBuffer);
     const audioDurationTicks = computePcm24kDurationTicks(pcmBuffer.length);
 
-    // 2. Validate and convert ElevenLabs character timestamps to UTF-16 exact word boundaries
+    // 3. Validate and convert ElevenLabs character timestamps to UTF-16 exact word boundaries
     const boundaries = convertElevenLabsAlignmentToBoundaries(text, data.alignment);
 
     return {

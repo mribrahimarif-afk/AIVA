@@ -54,7 +54,10 @@ function createDeterministicWavBuffer(durationMs: number): Buffer {
 }
 
 export interface FakeVoiceProviderOptions {
+  id?: string;
   isConfigured?: boolean;
+  defaultVoice?: string;
+  defaultModel?: string;
   errorToThrow?: Error;
   delayMs?: number;
   customDurationMs?: number;
@@ -64,9 +67,9 @@ export interface FakeVoiceProviderOptions {
 }
 
 export class FakeVoiceProvider implements VoiceProvider {
-  readonly id = "fake-voice-provider";
-  readonly defaultVoice: SupportedVoice = DEFAULT_VOICE;
-  readonly defaultModel = "fake-voice-model";
+  readonly id: string;
+  readonly defaultVoice: string;
+  readonly defaultModel: string;
 
   private configured: boolean;
   private errorToThrow?: Error;
@@ -77,6 +80,9 @@ export class FakeVoiceProvider implements VoiceProvider {
   private onSynthesize?: (options: VoiceSynthesisOptions) => void | Promise<void>;
 
   constructor(options: FakeVoiceProviderOptions = {}) {
+    this.id = options.id ?? "fake-voice-provider";
+    this.defaultVoice = options.defaultVoice !== undefined ? options.defaultVoice : DEFAULT_VOICE;
+    this.defaultModel = options.defaultModel ?? "fake-voice-model";
     this.configured = options.isConfigured ?? true;
     this.errorToThrow = options.errorToThrow;
     this.delayMs = options.delayMs ?? 0;

@@ -11,18 +11,27 @@ describe("ElevenLabs Live Smoke Test (Opt-in)", () => {
   it.skipIf(!hasElevenLabsKey)(
     "synthesizes short Roman Urdu test phrase with exact timing and WAV output when RUN_LIVE_TESTS is enabled",
     async () => {
+      const defaultVoiceId = process.env.ELEVENLABS_DEFAULT_VOICE_ID || "";
       const provider = new ElevenLabsVoiceProvider({
         apiKey: process.env.ELEVENLABS_API_KEY,
         modelId: process.env.ELEVENLABS_MODEL_ID || "eleven_v3",
-        defaultVoiceId: process.env.ELEVENLABS_DEFAULT_VOICE_ID || "21m00Tcm4TlvDq8ikWAM",
+        defaultVoiceId,
       });
+
+      let targetVoice = defaultVoiceId;
+      if (!targetVoice) {
+        const voices = await provider.listVoices();
+        if (voices.length > 0 && voices[0]) {
+          targetVoice = voices[0].voiceId || voices[0].name;
+        }
+      }
 
       const script = "Aaj hum AIVA ki voice testing kar rahe hain.";
       const startTime = Date.now();
 
       const result = await provider.synthesize({
         text: script,
-        voiceName: provider.defaultVoice,
+        voiceName: targetVoice,
       });
 
       const latencyMs = Date.now() - startTime;

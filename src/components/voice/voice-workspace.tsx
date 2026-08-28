@@ -1,25 +1,26 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import * as React from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import {
-  VoiceProviderId,
-  VoiceProfile,
   VoiceTrackDto,
+  VoiceProfile,
+  VoiceProviderId,
   VOICE_PROFILES,
 } from "@/domain/voice";
 
-interface VoiceWorkspaceProps {
+export interface VoiceWorkspaceProps {
   projectId: string;
   hasDirectorPlan: boolean;
   directorScriptHash?: string;
   initialVoiceTrack?: VoiceTrackDto | null;
-  isConfigured?: boolean; // legacy prop
+  isConfigured?: boolean;
   azureConfigured?: boolean;
   elevenLabsConfigured?: boolean;
-  defaultVoice?: string; // legacy prop
+  defaultVoice?: string;
   defaultAzureVoice?: string;
   defaultElevenLabsVoice?: string;
   supportedVoices?: VoiceProfile[]; // legacy prop
@@ -37,7 +38,7 @@ export function VoiceWorkspace({
   elevenLabsConfigured = false,
   defaultVoice = "ur-PK-AsadNeural",
   defaultAzureVoice = "ur-PK-AsadNeural",
-  defaultElevenLabsVoice = "21m00Tcm4TlvDq8ikWAM",
+  defaultElevenLabsVoice = "",
   supportedVoices = Object.values(VOICE_PROFILES),
   azureVoices,
   elevenLabsVoices = [],
@@ -51,10 +52,14 @@ export function VoiceWorkspace({
       : "AZURE";
 
   const [selectedProvider, setSelectedProvider] = useState<VoiceProviderId>(initialProvider);
-  const [selectedVoice, setSelectedVoice] = useState<string>(
-    initialVoiceTrack?.voiceName ||
-      (initialProvider === "ELEVENLABS" ? defaultElevenLabsVoice : defaultAzureVoice || defaultVoice)
-  );
+  const [selectedVoice, setSelectedVoice] = useState<string>(() => {
+    if (initialVoiceTrack?.voiceName) return initialVoiceTrack.voiceName;
+    if (initialProvider === "ELEVENLABS") {
+      const match = defaultElevenLabsVoice && elevenLabsVoices.some((v) => v.name === defaultElevenLabsVoice || v.voiceId === defaultElevenLabsVoice);
+      return match ? defaultElevenLabsVoice : (elevenLabsVoices[0]?.name || "");
+    }
+    return defaultAzureVoice || defaultVoice;
+  });
 
   const [track, setTrack] = useState<VoiceTrackDto | null>(initialVoiceTrack);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -70,7 +75,14 @@ export function VoiceWorkspace({
     } else {
       const exists = elevenLabsVoices.some((v) => v.name === selectedVoice || v.voiceId === selectedVoice);
       if (!exists) {
-        setSelectedVoice(defaultElevenLabsVoice || elevenLabsVoices[0]?.name || "21m00Tcm4TlvDq8ikWAM");
+        const match = defaultElevenLabsVoice && elevenLabsVoices.some((v) => v.name === defaultElevenLabsVoice || v.voiceId === defaultElevenLabsVoice);
+        if (match) {
+          setSelectedVoice(defaultElevenLabsVoice);
+        } else if (elevenLabsVoices.length > 0 && elevenLabsVoices[0]?.name) {
+          setSelectedVoice(elevenLabsVoices[0].name);
+        } else {
+          setSelectedVoice("");
+        }
       }
     }
   }, [selectedProvider, selectedVoice, activeAzureVoices, elevenLabsVoices, defaultAzureVoice, defaultElevenLabsVoice]);
@@ -81,8 +93,11 @@ export function VoiceWorkspace({
   const isCurrentProviderConfigured =
     selectedProvider === "AZURE" ? isAzureConfig : elevenLabsConfigured;
 
+  const currentVoiceList = selectedProvider === "AZURE" ? activeAzureVoices : elevenLabsVoices;
+  const canGenerate = isCurrentProviderConfigured && currentVoiceList.length > 0 && selectedVoice.trim().length > 0;
+
   async function handleGenerateVoice(force = false) {
-    if (isGenerating) return;
+    if (isGenerating || !canGenerate) return;
 
     setIsGenerating(true);
     setError(null);
@@ -119,8 +134,6 @@ export function VoiceWorkspace({
     const seconds = totalSeconds % 60;
     return `${minutes}:${seconds.toString().padStart(2, "0")}`;
   }
-
-  const currentVoiceList = selectedProvider === "AZURE" ? activeAzureVoices : elevenLabsVoices;
 
   return (
     <Card className="p-6 bg-slate-900/60 border-slate-800 backdrop-blur-md rounded-xl space-y-6">
@@ -165,14 +178,16 @@ export function VoiceWorkspace({
                   The script was re-analyzed in Director. Regenerate voice narration to update timing.
                 </p>
               </div>
-              <Button
-                variant="secondary"
-                className="whitespace-nowrap text-xs"
-                onClick={() => handleGenerateVoice(true)}
-                disabled={isGenerating}
-              >
-                {isGenerating ? "Regenerating..." : "Regenerate Now"}
-              </Button>
+              {canGenerate && (
+                <Button
+                  variant="secondary"
+                  className="whitespace-nowrap text-xs"
+                  onClick={() => handleGenerateVoice(true)}
+                  disabled={isGenerating || !canGenerate}
+                >
+                  {isGenerating ? "Regenerating..." : "Regenerate Now"}
+                </Button>
+              )}
             </div>
           )}
 
@@ -260,7 +275,7 @@ export function VoiceWorkspace({
           {/* Empty Voice List Notice */}
           {isCurrentProviderConfigured && currentVoiceList.length === 0 && (
             <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm">
-              <p className="font-semibold">Unable to load {selectedProvider === "ELEVENLABS" ? "ElevenLabs" : "Azure"} voices.</p>
+              <p className="font-semibold">{`Unable to load ${selectedProvider === "ELEVENLABS" ? "ElevenLabs" : "Azure"} voices.`}</p>
               <p className="mt-1 text-amber-300/80">
                 No accessible voices were returned by the provider. Please verify your API key and network connection.
               </p>
@@ -293,7 +308,7 @@ export function VoiceWorkspace({
                 <Button
                   className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-medium"
                   onClick={() => handleGenerateVoice(Boolean(track))}
-                  disabled={isGenerating}
+                  disabled={isGenerating || !canGenerate}
                 >
                   {isGenerating ? (
                     <span className="flex items-center gap-2">
