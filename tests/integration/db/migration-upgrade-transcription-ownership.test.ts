@@ -4,6 +4,40 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 
+function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let blockDepth = 0;
+
+  for (const line of sql.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("--") || trimmed.length === 0) continue;
+
+    current += line + "\n";
+
+    const upper = trimmed.toUpperCase();
+    if (upper.includes("BEGIN") || /\bCASE\b/.test(upper)) {
+      blockDepth++;
+    }
+    if (upper.startsWith("END") || upper.endsWith("END;") || /\bEND\b;?$/.test(upper)) {
+      if (blockDepth > 0) {
+        blockDepth--;
+      }
+    }
+
+    if (blockDepth === 0 && trimmed.endsWith(";")) {
+      statements.push(current.trim());
+      current = "";
+    }
+  }
+
+  if (current.trim().length > 0) {
+    statements.push(current.trim());
+  }
+
+  return statements.filter((s) => s.length > 0 && s !== ";");
+}
+
 describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B Remediation)", () => {
   const tempDbFile = path.join(
     os.tmpdir(),
@@ -26,7 +60,7 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
       },
     });
 
-    // Apply migrations 1 through 6
+    // Apply all standard migrations 1 through 9 sequentially
     const standardMigrationDirs = [
       "20260826121100_init",
       "20260827020000_vault_brand_product_assets",
@@ -34,6 +68,9 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
       "20260827140000_voice_track_boundaries",
       "20260828050000_voice_track_model",
       "20260828120000_audio_first_transcription",
+      "20260828160000_transcription_ownership_constraints",
+      "20260828180000_director_plan_provenance_hardening",
+      "20260828200000_director_audio_hash_required",
     ];
 
     for (const dir of standardMigrationDirs) {
@@ -41,86 +78,11 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
         path.resolve(process.cwd(), `prisma/migrations/${dir}/migration.sql`),
         "utf8"
       );
-      for (const stmt of sql.split(";").map((s) => s.trim()).filter(Boolean)) {
+      const stmts = splitSqlStatements(sql);
+      for (const stmt of stmts) {
         await prisma.$executeRawUnsafe(stmt);
       }
     }
-
-    // Apply migration 7 triggers (audio_sources activeTranscriptionId ownership)
-    await prisma.$executeRawUnsafe(`
-      CREATE TRIGGER IF NOT EXISTS trg_audio_sources_active_transcription_insert
-      BEFORE INSERT ON audio_sources
-      FOR EACH ROW
-      WHEN NEW.activeTranscriptionId IS NOT NULL
-      BEGIN
-        SELECT CASE
-          WHEN NOT EXISTS (
-            SELECT 1 FROM transcriptions
-            WHERE id = NEW.activeTranscriptionId AND audioSourceId = NEW.id
-          )
-          THEN RAISE(ABORT, 'activeTranscriptionId must reference a Transcription owned by this AudioSource')
-        END;
-      END
-    `);
-
-    await prisma.$executeRawUnsafe(`
-      CREATE TRIGGER IF NOT EXISTS trg_audio_sources_active_transcription_update
-      BEFORE UPDATE OF activeTranscriptionId ON audio_sources
-      FOR EACH ROW
-      WHEN NEW.activeTranscriptionId IS NOT NULL
-      BEGIN
-        SELECT CASE
-          WHEN NOT EXISTS (
-            SELECT 1 FROM transcriptions
-            WHERE id = NEW.activeTranscriptionId AND audioSourceId = NEW.id
-          )
-          THEN RAISE(ABORT, 'activeTranscriptionId must reference a Transcription owned by this AudioSource')
-        END;
-      END
-    `);
-
-    // Apply migration 8 triggers (director_plans project-scoped provenance hardening)
-    await prisma.$executeRawUnsafe(`
-      CREATE TRIGGER IF NOT EXISTS trg_director_plans_source_transcription_insert
-      BEFORE INSERT ON director_plans
-      FOR EACH ROW
-      WHEN NEW.sourceType = 'AUDIO_TRANSCRIPT'
-      BEGIN
-        SELECT CASE
-          WHEN NEW.sourceTranscriptionId IS NULL OR NOT EXISTS (
-            SELECT 1 FROM transcriptions
-            WHERE id = NEW.sourceTranscriptionId AND projectId = NEW.projectId
-          )
-          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan requires a valid sourceTranscriptionId belonging to the same project')
-          WHEN NEW.sourceAudioHash IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM transcriptions
-            WHERE id = NEW.sourceTranscriptionId AND sourceAudioHash = NEW.sourceAudioHash
-          )
-          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan sourceAudioHash must match the referenced transcription')
-        END;
-      END
-    `);
-
-    await prisma.$executeRawUnsafe(`
-      CREATE TRIGGER IF NOT EXISTS trg_director_plans_source_transcription_update
-      BEFORE UPDATE ON director_plans
-      FOR EACH ROW
-      WHEN NEW.sourceType = 'AUDIO_TRANSCRIPT'
-      BEGIN
-        SELECT CASE
-          WHEN NEW.sourceTranscriptionId IS NULL OR NOT EXISTS (
-            SELECT 1 FROM transcriptions
-            WHERE id = NEW.sourceTranscriptionId AND projectId = NEW.projectId
-          )
-          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan requires a valid sourceTranscriptionId belonging to the same project')
-          WHEN NEW.sourceAudioHash IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM transcriptions
-            WHERE id = NEW.sourceTranscriptionId AND sourceAudioHash = NEW.sourceAudioHash
-          )
-          THEN RAISE(ABORT, 'AUDIO_TRANSCRIPT DirectorPlan sourceAudioHash must match the referenced transcription')
-        END;
-      END
-    `);
   });
 
   afterAll(async () => {
@@ -229,7 +191,55 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
     ).rejects.toThrow();
   });
 
-  it("4. database trigger allows DirectorPlan when sourceTranscriptionId and sourceAudioHash match the project", async () => {
+  it("4. database trigger rejects AUDIO_TRANSCRIPT DirectorPlan with NULL sourceAudioHash", async () => {
+    await expect(
+      prisma.directorPlan.create({
+        data: {
+          id: "dp-null-hash-fail",
+          projectId: "p-test-own-1",
+          originalScript: "Test script",
+          scriptHash: "hash-script-null-test",
+          unitizerVersion: "v1",
+          schemaVersion: "v1",
+          promptVersion: "v1",
+          model: "gemini-model",
+          language: "en",
+          contentType: "PROMOTIONAL",
+          summary: "Summary",
+          creativeDirection: "Direction",
+          sourceType: "AUDIO_TRANSCRIPT",
+          sourceTranscriptionId: "t-own-1",
+          sourceAudioHash: null, // NULL must be rejected!
+        },
+      })
+    ).rejects.toThrow();
+  });
+
+  it("5. database trigger rejects AUDIO_TRANSCRIPT DirectorPlan with mismatched sourceAudioHash", async () => {
+    await expect(
+      prisma.directorPlan.create({
+        data: {
+          id: "dp-mismatched-hash-fail",
+          projectId: "p-test-own-1",
+          originalScript: "Test script",
+          scriptHash: "hash-script-mismatch",
+          unitizerVersion: "v1",
+          schemaVersion: "v1",
+          promptVersion: "v1",
+          model: "gemini-model",
+          language: "en",
+          contentType: "PROMOTIONAL",
+          summary: "Summary",
+          creativeDirection: "Direction",
+          sourceType: "AUDIO_TRANSCRIPT",
+          sourceTranscriptionId: "t-own-1",
+          sourceAudioHash: "different-hash-value", // Mismatched hash!
+        },
+      })
+    ).rejects.toThrow();
+  });
+
+  it("6. database trigger allows AUDIO_TRANSCRIPT DirectorPlan when sourceTranscriptionId and sourceAudioHash match exactly", async () => {
     const plan = await prisma.directorPlan.create({
       data: {
         id: "dp-valid-prov",
@@ -246,11 +256,45 @@ describe("Database Migration Upgrade & Ownership Trigger Verification (TASK-004B
         creativeDirection: "Direction",
         sourceType: "AUDIO_TRANSCRIPT",
         sourceTranscriptionId: "t-own-1",
-        sourceAudioHash: "hash-1",
+        sourceAudioHash: "hash-1", // Matches t-own-1.sourceAudioHash!
       },
     });
 
     expect(plan.id).toBe("dp-valid-prov");
     expect(plan.sourceTranscriptionId).toBe("t-own-1");
+    expect(plan.sourceAudioHash).toBe("hash-1");
+  });
+
+  it("7. database trigger allows SCRIPT DirectorPlan without requiring Audio-First fields", async () => {
+    await prisma.project.create({
+      data: {
+        id: "p-test-script-1",
+        name: "Script Project",
+      },
+    });
+
+    const plan = await prisma.directorPlan.create({
+      data: {
+        id: "dp-script-first-valid",
+        projectId: "p-test-script-1",
+        originalScript: "Script First text",
+        scriptHash: "hash-script-sf",
+        unitizerVersion: "v1",
+        schemaVersion: "v1",
+        promptVersion: "v1",
+        model: "gemini-model",
+        language: "en",
+        contentType: "PROMOTIONAL",
+        summary: "Summary",
+        creativeDirection: "Direction",
+        sourceType: "SCRIPT",
+        sourceTranscriptionId: null,
+        sourceAudioHash: null,
+      },
+    });
+
+    expect(plan.id).toBe("dp-script-first-valid");
+    expect(plan.sourceType).toBe("SCRIPT");
+    expect(plan.sourceTranscriptionId).toBeNull();
   });
 });

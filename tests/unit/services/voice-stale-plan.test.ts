@@ -69,7 +69,11 @@ describe("VoiceService — Stale Audio-First Plan Rejection & Script-First Non-R
     audioFileExists: vi.fn(async () => true),
   };
 
-  it("rejects voice generation when Audio-First Director plan is based on a stale transcription", async () => {
+  it("rejects voice generation when Audio-First Director plan is based on a stale transcription (0 provider calls, 0 DB rows, 0 storage writes)", async () => {
+    const synthesizeSpy = vi.spyOn(fakeVoiceProvider, "synthesize");
+    voiceTrackRepo.replaceTrack.mockClear();
+    mockVoiceStorage.stageAndPublishAudio.mockClear();
+
     // Stale plan references T1, but active transcription on AudioSource A1 has changed to T2
     const stalePlan = {
       id: "plan-1",
@@ -144,6 +148,11 @@ describe("VoiceService — Stale Audio-First Plan Rejection & Script-First Non-R
     await expect(
       voiceService.generateVoice("proj-1", { provider: "AZURE" })
     ).rejects.toThrow(DomainError);
+
+    // Strict behavioral evidence: 0 provider calls, 0 track creations, 0 storage publications
+    expect(synthesizeSpy).not.toHaveBeenCalled();
+    expect(voiceTrackRepo.replaceTrack).not.toHaveBeenCalled();
+    expect(mockVoiceStorage.stageAndPublishAudio).not.toHaveBeenCalled();
   });
 
   it("permits voice generation when Audio-First Director plan is current", async () => {

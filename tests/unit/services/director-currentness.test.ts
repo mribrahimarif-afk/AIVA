@@ -9,7 +9,7 @@ import type {
   TranscriptionRepository,
 } from "@/repositories";
 import type { DirectorAiProvider } from "@/providers/ai";
-import { ValidationError } from "@/domain/errors";
+import { ValidationError, NotFoundError } from "@/domain/errors";
 
 describe("Director Audio-First Currentness and Provenance", () => {
   const dummyLogger = {
@@ -335,6 +335,67 @@ describe("Director Audio-First Currentness and Provenance", () => {
         sourceAudioHash: "mismatched-hash",
       })
     ).rejects.toThrow(ValidationError);
+
+    expect(aiProvider.analyze).not.toHaveBeenCalled();
+  });
+
+  it("rejects Audio-First plan creation when sourceTranscriptionId is missing or nonexistent", async () => {
+    const planRepo = {
+      findByProjectId: vi.fn(async () => null),
+      replacePlan: vi.fn(),
+    };
+
+    const audioSourceRepo = {
+      create: vi.fn(),
+      findById: vi.fn(async () => null),
+      findByProjectId: vi.fn(async () => []),
+      findBySourceHash: vi.fn(),
+      setActiveTranscription: vi.fn(),
+      delete: vi.fn(),
+    };
+
+    const transcriptionRepo = {
+      findById: vi.fn(async () => null),
+      findByAudioSourceId: vi.fn(),
+      findByAudioSourceAndConfigurationHash: vi.fn(),
+      delete: vi.fn(),
+    };
+
+    const aiProvider: DirectorAiProvider = {
+      id: "test-ai",
+      modelName: "test-model",
+      isConfigured: () => true,
+      analyze: vi.fn(),
+      repair: vi.fn(),
+    };
+
+    const service = createDirectorService({
+      directorPlanRepository: planRepo as unknown as DirectorPlanRepository,
+      projectRepository: projectRepo as unknown as ProjectRepository,
+      brandRepository: brandRepo as unknown as BrandRepository,
+      productRepository: productRepo as unknown as ProductRepository,
+      audioSourceRepository: audioSourceRepo as unknown as AudioSourceRepository,
+      transcriptionRepository: transcriptionRepo as unknown as TranscriptionRepository,
+      directorAiProvider: aiProvider,
+      logger: dummyLogger as any,
+    });
+
+    // Case 1: Missing sourceTranscriptionId -> ValidationError
+    await expect(
+      service.analyzeAndPlan("P1", {
+        script: "Text",
+        sourceType: "AUDIO_TRANSCRIPT",
+      })
+    ).rejects.toThrow(ValidationError);
+
+    // Case 2: Non-existent sourceTranscriptionId -> NotFoundError
+    await expect(
+      service.analyzeAndPlan("P1", {
+        script: "Text",
+        sourceType: "AUDIO_TRANSCRIPT",
+        sourceTranscriptionId: "non-existent-id",
+      })
+    ).rejects.toThrow(NotFoundError);
 
     expect(aiProvider.analyze).not.toHaveBeenCalled();
   });
