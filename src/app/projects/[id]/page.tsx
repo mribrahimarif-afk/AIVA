@@ -16,6 +16,7 @@ import { DirectorWorkspace } from "@/components/director/director-workspace";
 import { VoiceWorkspace } from "@/components/voice/voice-workspace";
 import { AudioFirstWorkspace } from "@/components/audio-first/audio-first-workspace";
 import { VOICE_PROFILES } from "@/domain/voice";
+import { TimelineWorkspace } from "@/components/timeline/timeline-workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +36,7 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
     notFound();
   }
 
-  const [plan, brands, voiceTrack, elevenLabsVoices, audioSources, activeTranscription] =
+  const [plan, brands, voiceTrack, elevenLabsVoices, audioSources, activeTranscription, timeline] =
     await Promise.all([
       services.director.getPlan(id),
       services.brand.listBrands(),
@@ -43,6 +44,7 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
       elevenLabsVoiceProvider.listVoices().catch(() => []),
       services.transcription.getAudioSources(id).catch(() => []),
       services.transcription.getActiveTranscription(id).catch(() => null),
+      services.timeline.getCurrent(id).catch(() => null),
     ]);
 
   const isAiConfigured = services.director.isAiConfigured();
@@ -112,6 +114,12 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
           />
         );
       })()}
+
+      <TimelineWorkspace
+        projectId={id}
+        initialTimeline={timeline}
+        prerequisite={!plan ? "Generate a Director plan first" : plan.sourceType === "AUDIO_TRANSCRIPT" ? (!activeTranscription ? "Transcribe audio first" : undefined) : (!voiceTrack ? "Generate narration first" : undefined)}
+      />
     </div>
   );
 }
